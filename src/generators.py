@@ -30,7 +30,7 @@ ALERT_STATUSES = ["open", "in_review", "closed"]
 RISK_RATINGS = ["low", "medium", "high"]
 ACCOUNT_TYPES = ["checking", "savings"]
 ACCOUNT_STATUSES = ["active", "blocked", "closed"]
-TX_TYPES = ["wire", "transfer", "cash", "card"]
+TX_TYPES = ["SEPA_CT, SEPA_INST, CARD_POS, ATM_WITHDRAWAL, CASH_DEPOSIT"]
 CURRENCIES = ["EUR", "CHF", "USD"]
 ID_DOC_TYPES = ["passport", "national_id"]
 

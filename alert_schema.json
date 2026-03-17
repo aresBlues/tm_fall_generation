@@ -1,3 +1,4 @@
+
 {
     "alert_id": "string",
     "created_at": "2026-02-02T14:28:12Z",
@@ -7,16 +8,14 @@
   
     "rules_triggered": [
       {
-        "rule_id": "R001",
-        "rule_name_en": "Structuring",
-        "rule_name_de": "Strukturierung",
-        "score_contribution": 0.45
+        "rule_id": "string",
+        "rule_name_en": "string",
+        "rule_name_de": "string",
+        "score_contribution": 0.0
       }
     ],
-  
-    "primary_rule_id": "R001",
-  
-    "alert_reason_summary": "string (German human-readable summary why alert fired)",
+    "primary_rule_id": "string",
+    "alert_reason_summary": "string",
   
     "customer_profile": {
       "customer_id": "string",
@@ -38,21 +37,18 @@
         "city": "string",
         "country": "string (ISO2)"
       },
-  
       "shipping_address": {
         "street": "string",
         "postal_code": "string",
         "city": "string",
         "country": "string (ISO2)"
       },
-  
       "id_document_address": {
         "street": "string",
         "postal_code": "string",
         "city": "string",
         "country": "string (ISO2)"
       },
-  
       "business_address": {
         "street": "string",
         "postal_code": "string",
@@ -76,38 +72,42 @@
       "expected_monthly_income": 0,
       "expected_monthly_turnover": 0,
       "customer_type": "private | business",
+  
       "ubo": [
         {
           "name": "string",
           "ownership_percentage": 0
         }
       ],
+  
       "alerts_last_12m": 0
     },
   
-    "trigger_transaction": {
-      "transaction_id": "string",
-      "timestamp": "2026-01-07T14:28:12Z",
-      "amount": 0.0,
-      "currency": "EUR",
-      "direction": "in | out",
-      "payment_rail": "SEPA_CT | SEPA_INST | CARD_POS | ATM_WITHDRAWAL | CASH_DEPOSIT | SWIFT",
-      "booking_channel": "mobile | online_banking | atm | card_terminal",
-      "payment_reference": "string",
-      "type": "transfer | cash | wire | card",
+    "trigger_transactions": [
+      {
+        "transaction_id": "string",
+        "timestamp": "2026-01-07T14:28:12Z",
+        "amount": 0.0,
+        "currency": "EUR",
+        "direction": "in | out",
+        "payment_rail": "SEPA_CT | SEPA_INST | CARD_POS | ATM_WITHDRAWAL | CASH_DEPOSIT | SWIFT",
+        "booking_channel": "mobile | online_banking | atm | card_terminal",
+        "payment_reference": "string",
+        "type": "transfer | cash | wire | card",
   
-      "counterparty_name": "string",
-      "counterparty_iban": "string",
-      "counterparty_bic": "string",
-      "counterparty_bank_name": "string",
-      "counterparty_country_iso": "string (ISO2)",
+        "counterparty_name": "string",
+        "counterparty_iban": "string",
+        "counterparty_bic": "string",
+        "counterparty_bank_name": "string",
+        "counterparty_country_iso": "string (ISO2)",
   
-      "cash_transaction_type": "deposit | withdrawal | null",
-      "atm_city": "string",
-      "atm_country": "string (ISO2)",
+        "cash_transaction_type": "deposit | withdrawal | null",
+        "atm_city": "string",
+        "atm_country": "string (ISO2)",
   
-      "remaining_account_balance_after_tx": 0.0
-    },
+        "remaining_account_balance_after_tx": 0.0
+      }
+    ],
   
     "transaction_history": [
       {
@@ -119,7 +119,8 @@
         "type": "transfer | wire | cash | card",
         "counterparty_name": "string",
         "counterparty_iban": "string",
-        "description": "string (German)"
+        "counterparty_country_iso": "string (ISO2)",
+        "description": "string"
       }
     ],
   
@@ -133,8 +134,21 @@
       "avg_tx_amount_3m": 0.0,
       "amount_multiplier_vs_3m": 0.0,
   
-      "counterparty_seen_before": false,
-      "counterparty_frequency": 0,
+      "unique_counterparties_12m": 0,
+      "new_counterparties_30d": 0,
+      "high_risk_counterparties_12m": 0,
+  
+      "counterparty_stats": [
+        {
+          "name": "string",
+          "country_iso": "string (ISO2)",
+          "seen_before": false,
+          "frequency_12m": 0,
+          "total_volume_12m": 0.0,
+          "first_seen": "YYYY-MM-DD",
+          "last_seen": "YYYY-MM-DD"
+        }
+      ],
   
       "country_frequency": {
         "DE": 42,
@@ -155,9 +169,7 @@
   
     "counterparty_profile": {
       "type": "private | business",
-      "risk_signals": [
-        "string"
-      ],
+      "risk_signals": ["string"],
       "known_relationship": false
     },
   
@@ -194,3 +206,4 @@
       }
     ]
   }
+  
