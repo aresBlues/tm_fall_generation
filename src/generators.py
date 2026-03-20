@@ -18,15 +18,11 @@ from src.models import (
     AccountSummary,
     Address,
     Alert,
-    Attachment,
     BehaviorStats,
-    CounterpartyProfile,
-    CounterpartyStat,
     CustomerLast12mStats,
     CustomerProfile,
     HistoryTransaction,
     IdDocument,
-    InvestigationContext,
     RuleTriggered,
     TriggerTransaction,
     UBO,
@@ -117,12 +113,82 @@ ALERT_REASON_SUMMARIES: dict[str, str] = {
     "unusual_pattern": "Transaction pattern deviates substantially from historical customer profile.",
 }
 
-RISK_SIGNAL_OPTIONS = [
-    "high_risk_jurisdiction", "shell_company_indicator", "pep_connection",
-    "adverse_media_hit", "unusual_business_structure", "sanctions_proximity",
+
+GERMAN_MONTHS = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
 ]
 
-ATTACHMENT_TYPES = ["invoice", "screenshot", "document"]
+_PAYMENT_REFS_IN_TRANSFER = [
+    "Gehalt {month} {year}",
+    "Miete {month} {year}",
+    "Mieteinnahme {month} {year}",
+    "Gutschrift Dauerauftrag",
+    "Rückerstattung Rechnung {ref}",
+    "Einzahlung Sparvertrag",
+    "Honorar {month} {year}",
+    "Provision Q{quarter}/{year}",
+]
+_PAYMENT_REFS_OUT_TRANSFER = [
+    "Miete {month} {year}",
+    "Dauerauftrag Strom/Gas",
+    "Versicherungsbeitrag {month} {year}",
+    "Rechnung Nr. {ref}",
+    "Zahlung an {name}",
+    "Ratenzahlung Kredit {ref}",
+    "Telefonrechnung {month} {year}",
+    "Internet Rechnung {month}/{year}",
+    "Mitgliedsbeitrag {year}",
+    "KFZ-Steuer {year}",
+]
+_PAYMENT_REFS_CASH_IN = [
+    "Bargeldeinzahlung",
+    "Bargeldeinzahlung Filiale",
+    "Einzahlung am Automaten",
+]
+_PAYMENT_REFS_CASH_OUT = [
+    "Bargeldauszahlung",
+    "Geldautomat {city}",
+    "ATM Auszahlung",
+]
+_PAYMENT_REFS_CARD = [
+    "Kartenzahlung {name}",
+    "POS {name}",
+    "EC-Kartenzahlung {name}",
+    "Kontaktlos {name}",
+]
+_PAYMENT_REFS_WIRE = [
+    "Auslandsüberweisung {name}",
+    "SWIFT Transfer Ref {ref}",
+    "Internationale Zahlung {ref}",
+    "Wire Transfer an {name}",
+]
+
+
+def _generate_payment_reference(
+    tx_type: str, direction: str, dt: datetime, cp_name: str,
+) -> str:
+    month = GERMAN_MONTHS[dt.month - 1]
+    year = dt.year
+    quarter = (dt.month - 1) // 3 + 1
+    ref = fake.numerify(text="#####")
+
+    if tx_type == "cash":
+        pool = _PAYMENT_REFS_CASH_IN if direction == "in" else _PAYMENT_REFS_CASH_OUT
+    elif tx_type == "card":
+        pool = _PAYMENT_REFS_CARD
+    elif tx_type == "wire":
+        pool = _PAYMENT_REFS_WIRE
+    elif direction == "in":
+        pool = _PAYMENT_REFS_IN_TRANSFER
+    else:
+        pool = _PAYMENT_REFS_OUT_TRANSFER
+
+    template = random.choice(pool)
+    return template.format(
+        month=month, year=year, quarter=quarter,
+        ref=ref, name=cp_name, city=fake.city(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +215,6 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
     customer_type = random.choices(["private", "business"], weights=[70, 30])[0]
 
     legal = _generate_address()
-    # Shipping / id_document address same as legal ~60 % of the time
-    shipping = legal if random.random() < 0.6 else _generate_address()
-    id_doc_addr = legal if random.random() < 0.6 else _generate_address()
-    business = _generate_address() if customer_type == "business" else _generate_address()
 
     issued = fake.date_between(start_date="-10y", end_date="-1y")
     expires = issued.replace(year=issued.year + 10)
@@ -182,9 +244,6 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
         email=fake.email(),
         phone_number=fake.phone_number(),
         legal_address=legal,
-        shipping_address=shipping,
-        id_document_address=id_doc_addr,
-        business_address=business,
         id_document=IdDocument(
             type=random.choice(ID_DOC_TYPES),
             number=fake.bothify(text="??########"),
@@ -245,14 +304,15 @@ def generate_account_summary(account_id: str, currency: str, balance: float) -> 
 class _InternalTx:
     """Mutable record used while building the 12-month pool."""
     __slots__ = (
-        "tx_id", "dt", "amount", "currency", "direction", "tx_type",
+        "account_id", "tx_id", "dt", "amount", "currency", "direction", "tx_type",
         "payment_rail", "booking_channel", "payment_reference",
         "cp_name", "cp_iban", "cp_bic", "cp_bank", "cp_country",
         "cash_tx_type", "atm_city", "atm_country",
-        "description", "balance_after", "is_trigger",
+        "balance_after", "is_trigger",
     )
 
     def __init__(self) -> None:
+        self.account_id: str = ""
         self.tx_id: str = ""
         self.dt: datetime = datetime.min
         self.amount: float = 0.0
@@ -270,7 +330,6 @@ class _InternalTx:
         self.cash_tx_type: str | None = None
         self.atm_city: str | None = None
         self.atm_country: str | None = None
-        self.description: str = ""
         self.balance_after: float = 0.0
         self.is_trigger: bool = False
 
@@ -294,6 +353,7 @@ def _generate_tx_pool(
     opening_balance: float,
     alert_type: str,
     num_trigger: int,
+    num_background: int | None = None,
 ) -> tuple[list[_InternalTx], float]:
     """Build the full 12-month transaction pool and return (pool, final_balance).
 
@@ -303,13 +363,15 @@ def _generate_tx_pool(
     """
 
     # -- Background transactions (spread over 12 months) --------------------
-    num_background = random.randint(40, 80)
+    if num_background is None:
+        num_background = random.randint(40, 80)
     pool: list[_InternalTx] = []
     tx_counter = 0
 
     for _ in range(num_background):
         tx_counter += 1
         tx = _InternalTx()
+        tx.account_id = account_id
         tx.tx_id = f"TX-{account_id}-{tx_counter:04d}"
         tx.dt = _random_dt_between(HISTORY_START, GENERATION_NOW)
         tx.currency = currency
@@ -317,14 +379,11 @@ def _generate_tx_pool(
         tx.tx_type = random.choice(TX_TYPES)
         tx.payment_rail = random.choice(PAYMENT_RAILS)
         tx.booking_channel = random.choice(BOOKING_CHANNELS)
-        tx.payment_reference = fake.bothify(text="REF-####-????")
         tx.cp_name = fake.company() if random.random() > 0.3 else fake.name()
         tx.cp_iban = fake.iban()
         tx.cp_country = _iban_country(tx.cp_iban)
         tx.cp_bic = fake.bothify(text="????DE##???")
         tx.cp_bank = fake.company() + " Bank"
-        tx.description = fake.sentence(nb_words=4).rstrip(".") or "Payment"
-        # Amount assigned later during balance walk
         tx.is_trigger = False
 
         # Cash-specific
@@ -348,17 +407,16 @@ def _generate_tx_pool(
     for i in range(num_trigger):
         tx_counter += 1
         tx = _InternalTx()
+        tx.account_id = account_id
         tx.tx_id = f"TX-{account_id}-{tx_counter:04d}"
         tx.currency = currency
         tx.is_trigger = True
-        tx.payment_reference = fake.bothify(text="REF-####-????")
         tx.cp_name = fake.company() if random.random() > 0.3 else fake.name()
         tx.cp_iban = fake.iban()
         tx.cp_country = _iban_country(tx.cp_iban)
         tx.cp_bic = fake.bothify(text="????DE##???")
         tx.cp_bank = fake.company() + " Bank"
         tx.booking_channel = random.choice(BOOKING_CHANNELS)
-        tx.description = fake.sentence(nb_words=4).rstrip(".") or "Payment"
 
         # Shape by alert type
         if alert_type == "structuring":
@@ -438,6 +496,12 @@ def _generate_tx_pool(
 
         tx.balance_after = round(balance, 2)
 
+    # -- Assign payment references (after balance walk, direction is final) --
+    for tx in pool:
+        tx.payment_reference = _generate_payment_reference(
+            tx.tx_type, tx.direction, tx.dt, tx.cp_name,
+        )
+
     return pool, round(balance, 2)
 
 
@@ -462,17 +526,14 @@ def compute_behavior_stats(
     amounts_3m: list[float] = []
 
     cp_first_seen: dict[str, str] = {}
-    cp_last_seen: dict[str, str] = {}
     cp_country: dict[str, str] = {}
     cp_freq: dict[str, int] = defaultdict(int)
-    cp_vol: dict[str, float] = defaultdict(float)
-    country_freq: dict[str, int] = defaultdict(int)
 
     total_vol_12m = 0.0
     txn_count_12m = 0
 
     for tx in pool:
-        if tx.dt < d365:
+        if tx.dt < d365 or tx.dt > now:
             continue
         txn_count_12m += 1
         total_vol_12m += tx.amount
@@ -498,44 +559,24 @@ def compute_behavior_stats(
         if tx.dt >= d90:
             amounts_3m.append(tx.amount)
 
-        # Counterparty tracking
+        # Counterparty tracking (for unique/new/high-risk counts)
         name = tx.cp_name
         dt_str = tx.dt.strftime("%Y-%m-%d")
         if name not in cp_first_seen or dt_str < cp_first_seen[name]:
             cp_first_seen[name] = dt_str
-        if name not in cp_last_seen or dt_str > cp_last_seen[name]:
-            cp_last_seen[name] = dt_str
         cp_country[name] = tx.cp_country
         cp_freq[name] += 1
-        cp_vol[name] += tx.amount
-
-        # Country frequency
-        country_freq[tx.cp_country] += 1
 
     avg_3m = round(sum(amounts_3m) / len(amounts_3m), 2) if amounts_3m else 0.0
     trigger_amounts = [tx.amount for tx in pool if tx.is_trigger]
     avg_trigger = sum(trigger_amounts) / len(trigger_amounts) if trigger_amounts else avg_3m
     multiplier = round(avg_trigger / avg_3m, 2) if avg_3m > 0 else 1.0
 
-    # Counterparty stats
     all_cps = set(cp_freq.keys())
-    new_30d_names = {tx.cp_name for tx in pool if tx.dt >= d30}
+    new_30d_names = {tx.cp_name for tx in pool if d30 <= tx.dt <= now}
     old_names = {n for n, fs in cp_first_seen.items() if fs < d30.strftime("%Y-%m-%d")}
     new_cps_30d = new_30d_names - old_names
     hr_cps = {n for n, c in cp_country.items() if c in HIGH_RISK_COUNTRIES}
-
-    cp_stats = []
-    for name in sorted(all_cps):
-        first = cp_first_seen[name]
-        cp_stats.append(CounterpartyStat(
-            name=name,
-            country_iso=cp_country[name],
-            seen_before=first < d30.strftime("%Y-%m-%d"),
-            frequency_12m=cp_freq[name],
-            total_volume_12m=round(cp_vol[name], 2),
-            first_seen=first,
-            last_seen=cp_last_seen[name],
-        ))
 
     has_hr_country = any(tx.cp_country in HIGH_RISK_COUNTRIES for tx in pool if tx.is_trigger)
 
@@ -551,8 +592,6 @@ def compute_behavior_stats(
         unique_counterparties_12m=len(all_cps),
         new_counterparties_30d=len(new_cps_30d),
         high_risk_counterparties_12m=len(hr_cps),
-        counterparty_stats=cp_stats,
-        country_frequency=dict(country_freq),
         peer_group_deviation=round(random.uniform(-2.0, 3.0), 2),
         suspicious_keyword_hit=random.random() < 0.1,
         high_risk_country_hit=has_hr_country,
@@ -566,93 +605,12 @@ def compute_behavior_stats(
 
 
 # ---------------------------------------------------------------------------
-# Counterparty profile
-# ---------------------------------------------------------------------------
-
-def generate_counterparty_profile(trigger_txs: list[_InternalTx]) -> CounterpartyProfile:
-    has_hr = any(tx.cp_country in HIGH_RISK_COUNTRIES for tx in trigger_txs)
-    signals: list[str] = []
-    if has_hr:
-        signals.append("high_risk_jurisdiction")
-    if random.random() < 0.15:
-        signals.append(random.choice([s for s in RISK_SIGNAL_OPTIONS if s not in signals]))
-    return CounterpartyProfile(
-        type=random.choice(["private", "business"]),
-        risk_signals=signals,
-        known_relationship=random.random() < 0.4,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Investigation context
-# ---------------------------------------------------------------------------
-
-def generate_investigation_context(
-    alert_status: str,
-    requires_sar: bool,
-    rules: list[RuleTriggered],
-) -> InvestigationContext:
-    case_id = fake.bothify(text="CASE-########")
-
-    if alert_status == "closed" and requires_sar:
-        decision: str | None = "SAR"
-        sar_rec = True
-        sar_reason = "Suspicious activity confirmed after investigation."
-        notes = "Full investigation completed. SAR filed."
-    elif alert_status == "closed":
-        decision = "NO_SAR"
-        sar_rec = False
-        sar_reason = ""
-        notes = "Investigation completed. No suspicious activity found."
-    elif alert_status == "in_review":
-        decision = None
-        sar_rec = False
-        sar_reason = ""
-        notes = "Under review by analyst."
-    else:  # open
-        decision = None
-        sar_rec = False
-        sar_reason = ""
-        notes = ""
-
-    return InvestigationContext(
-        case_id=case_id,
-        investigation_status=alert_status,
-        analyst_decision=decision,
-        sar_recommended=sar_rec,
-        sar_reason=sar_reason,
-        source_of_funds_summary=fake.sentence(nb_words=8).rstrip(".") if alert_status != "open" else "",
-        customer_statement=fake.sentence(nb_words=10).rstrip(".") if alert_status == "closed" else "",
-        business_purpose=fake.sentence(nb_words=6).rstrip(".") if alert_status != "open" else "",
-        investigation_notes=notes,
-        rule_name_en=rules[0].rule_name_en if rules else "",
-        rule_name_de=rules[0].rule_name_de if rules else "",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Attachments
-# ---------------------------------------------------------------------------
-
-def generate_attachments() -> list[Attachment]:
-    n = random.choices([0, 1, 2], weights=[50, 35, 15])[0]
-    attachments = []
-    for i in range(n):
-        atype = random.choice(ATTACHMENT_TYPES)
-        attachments.append(Attachment(
-            type=atype,
-            description=f"{atype.capitalize()} related to investigation",
-            url=f"https://docs.internal/attachments/{fake.bothify(text='????????')}.pdf",
-        ))
-    return attachments
-
-
-# ---------------------------------------------------------------------------
 # Conversion helpers: _InternalTx → output models
 # ---------------------------------------------------------------------------
 
 def _to_trigger(tx: _InternalTx) -> TriggerTransaction:
     return TriggerTransaction(
+        account_id=tx.account_id,
         transaction_id=tx.tx_id,
         timestamp=tx.dt.isoformat(),
         amount=tx.amount,
@@ -676,6 +634,7 @@ def _to_trigger(tx: _InternalTx) -> TriggerTransaction:
 
 def _to_history(tx: _InternalTx) -> HistoryTransaction:
     return HistoryTransaction(
+        account_id=tx.account_id,
         transaction_id=tx.tx_id,
         timestamp=tx.dt.isoformat(),
         amount=tx.amount,
@@ -684,8 +643,11 @@ def _to_history(tx: _InternalTx) -> HistoryTransaction:
         type=tx.tx_type,
         counterparty_name=tx.cp_name,
         counterparty_iban=tx.cp_iban,
+        counterparty_bic=tx.cp_bic,
+        counterparty_bank_name=tx.cp_bank,
         counterparty_country_iso=tx.cp_country,
-        description=tx.description,
+        payment_reference=tx.payment_reference,
+        remaining_account_balance_after_tx=tx.balance_after,
     )
 
 
@@ -728,27 +690,28 @@ def generate_alert(alert_index: int) -> Alert:
     # Account summary (balance = final running balance)
     primary_account = generate_account_summary(account_id, currency, final_balance)
     account_summaries = [primary_account]
+
+    # Secondary account (30% chance) — background transactions only
+    secondary_pool: list[_InternalTx] = []
     if random.random() < 0.3:
         extra_id = f"ACC-{alert_index:05d}-{random.randint(2000000, 2999999)}"
-        extra_bal = round(random.uniform(1000, 50000), 2)
-        account_summaries.append(generate_account_summary(extra_id, currency, extra_bal))
+        extra_opening = round(random.uniform(1000, 50000), 2)
+        secondary_pool, extra_final = _generate_tx_pool(
+            extra_id, currency, extra_opening, alert_type,
+            num_trigger=0, num_background=random.randint(10, 25),
+        )
+        account_summaries.append(generate_account_summary(extra_id, currency, extra_final))
+
+    # Merge pools for stats and history
+    all_txs = pool + secondary_pool
 
     # Split pool → trigger + history output
     trigger_out = [_to_trigger(tx) for tx in pool if tx.is_trigger]
-    history_out = [_to_history(tx) for tx in pool if tx.dt >= HISTORY_OUTPUT_START]
+    history_out = [_to_history(tx) for tx in all_txs if HISTORY_OUTPUT_START <= tx.dt <= created_at_dt]
+    history_out.sort(key=lambda h: h.timestamp)
 
-    # Behavior stats (from full 12-month pool)
-    bstats = compute_behavior_stats(pool, created_at_dt)
-
-    # Counterparty profile
-    trigger_internal = [tx for tx in pool if tx.is_trigger]
-    cp_profile = generate_counterparty_profile(trigger_internal)
-
-    # Investigation context
-    inv_ctx = generate_investigation_context(status, requires_sar, rules)
-
-    # Attachments
-    attachments = generate_attachments()
+    # Behavior stats (from full 12-month pool across all accounts)
+    bstats = compute_behavior_stats(all_txs, created_at_dt)
 
     return Alert(
         alert_id=alert_id,
@@ -763,8 +726,5 @@ def generate_alert(alert_index: int) -> Alert:
         trigger_transactions=trigger_out,
         transaction_history=history_out,
         behavior_stats=bstats,
-        counterparty_profile=cp_profile,
-        investigation_context=inv_ctx,
-        attachments=attachments,
         account_summaries=account_summaries,
     )

@@ -37,24 +37,6 @@
         "city": "string",
         "country": "string (ISO2)"
       },
-      "shipping_address": {
-        "street": "string",
-        "postal_code": "string",
-        "city": "string",
-        "country": "string (ISO2)"
-      },
-      "id_document_address": {
-        "street": "string",
-        "postal_code": "string",
-        "city": "string",
-        "country": "string (ISO2)"
-      },
-      "business_address": {
-        "street": "string",
-        "postal_code": "string",
-        "city": "string",
-        "country": "string (ISO2)"
-      },
   
       "id_document": {
         "type": "passport | national_id | residence_permit",
@@ -85,6 +67,7 @@
   
     "trigger_transactions": [
       {
+        "account_id": "string",
         "transaction_id": "string",
         "timestamp": "2026-01-07T14:28:12Z",
         "amount": 0.0,
@@ -111,6 +94,7 @@
   
     "transaction_history": [
       {
+        "account_id": "string",
         "transaction_id": "string",
         "timestamp": "2026-01-02T10:12:00Z",
         "amount": 0.0,
@@ -119,8 +103,11 @@
         "type": "transfer | wire | cash | card",
         "counterparty_name": "string",
         "counterparty_iban": "string",
+        "counterparty_bic": "string",
+        "counterparty_bank_name": "string",
         "counterparty_country_iso": "string (ISO2)",
-        "description": "string"
+        "payment_reference": "string",
+        "remaining_account_balance_after_tx": 0.0
       }
     ],
   
@@ -138,23 +125,6 @@
       "new_counterparties_30d": 0,
       "high_risk_counterparties_12m": 0,
   
-      "counterparty_stats": [
-        {
-          "name": "string",
-          "country_iso": "string (ISO2)",
-          "seen_before": false,
-          "frequency_12m": 0,
-          "total_volume_12m": 0.0,
-          "first_seen": "YYYY-MM-DD",
-          "last_seen": "YYYY-MM-DD"
-        }
-      ],
-  
-      "country_frequency": {
-        "DE": 42,
-        "NL": 3
-      },
-  
       "peer_group_deviation": 0.0,
       "suspicious_keyword_hit": false,
       "high_risk_country_hit": false,
@@ -166,34 +136,6 @@
         "txn_count": 0
       }
     },
-  
-    "counterparty_profile": {
-      "type": "private | business",
-      "risk_signals": ["string"],
-      "known_relationship": false
-    },
-  
-    "investigation_context": {
-      "case_id": "string",
-      "investigation_status": "open | in_review | closed",
-      "analyst_decision": "SAR | NO_SAR | ESCALATE | null",
-      "sar_recommended": false,
-      "sar_reason": "string",
-      "source_of_funds_summary": "string",
-      "customer_statement": "string",
-      "business_purpose": "string",
-      "investigation_notes": "string",
-      "rule_name_en": "string",
-      "rule_name_de": "string"
-    },
-  
-    "attachments": [
-      {
-        "type": "invoice | screenshot | document",
-        "description": "string",
-        "url": "string"
-      }
-    ],
   
     "account_summaries": [
       {

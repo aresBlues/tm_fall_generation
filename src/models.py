@@ -73,9 +73,6 @@ class CustomerProfile:
     phone_number: str
 
     legal_address: Address
-    shipping_address: Address
-    id_document_address: Address
-    business_address: Address
 
     id_document: IdDocument
 
@@ -106,9 +103,6 @@ class CustomerProfile:
             "email": self.email,
             "phone_number": self.phone_number,
             "legal_address": self.legal_address.to_dict(),
-            "shipping_address": self.shipping_address.to_dict(),
-            "id_document_address": self.id_document_address.to_dict(),
-            "business_address": self.business_address.to_dict(),
             "id_document": self.id_document.to_dict(),
             "pep_flag": self.pep_flag,
             "sanctions_flag": self.sanctions_flag,
@@ -151,6 +145,7 @@ class RuleTriggered:
 @dataclass
 class TriggerTransaction:
     """A transaction that triggered the alert — rich detail."""
+    account_id: str
     transaction_id: str
     timestamp: str
     amount: float
@@ -172,6 +167,7 @@ class TriggerTransaction:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "account_id": self.account_id,
             "transaction_id": self.transaction_id,
             "timestamp": self.timestamp,
             "amount": self.amount,
@@ -195,7 +191,8 @@ class TriggerTransaction:
 
 @dataclass
 class HistoryTransaction:
-    """A transaction in the 90-day history window — lighter detail."""
+    """A transaction in the 90-day history window."""
+    account_id: str
     transaction_id: str
     timestamp: str
     amount: float
@@ -204,11 +201,15 @@ class HistoryTransaction:
     type: str                    # transfer | wire | cash | card
     counterparty_name: str
     counterparty_iban: str
+    counterparty_bic: str
+    counterparty_bank_name: str
     counterparty_country_iso: str  # ISO-2
-    description: str
+    payment_reference: str
+    remaining_account_balance_after_tx: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "account_id": self.account_id,
             "transaction_id": self.transaction_id,
             "timestamp": self.timestamp,
             "amount": self.amount,
@@ -217,36 +218,17 @@ class HistoryTransaction:
             "type": self.type,
             "counterparty_name": self.counterparty_name,
             "counterparty_iban": self.counterparty_iban,
+            "counterparty_bic": self.counterparty_bic,
+            "counterparty_bank_name": self.counterparty_bank_name,
             "counterparty_country_iso": self.counterparty_country_iso,
-            "description": self.description,
+            "payment_reference": self.payment_reference,
+            "remaining_account_balance_after_tx": self.remaining_account_balance_after_tx,
         }
 
 
 # ---------------------------------------------------------------------------
 # Behavior stats
 # ---------------------------------------------------------------------------
-
-@dataclass
-class CounterpartyStat:
-    name: str
-    country_iso: str
-    seen_before: bool
-    frequency_12m: int
-    total_volume_12m: float
-    first_seen: str   # YYYY-MM-DD
-    last_seen: str    # YYYY-MM-DD
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "country_iso": self.country_iso,
-            "seen_before": self.seen_before,
-            "frequency_12m": self.frequency_12m,
-            "total_volume_12m": self.total_volume_12m,
-            "first_seen": self.first_seen,
-            "last_seen": self.last_seen,
-        }
-
 
 @dataclass
 class CustomerLast12mStats:
@@ -277,9 +259,6 @@ class BehaviorStats:
     new_counterparties_30d: int
     high_risk_counterparties_12m: int
 
-    counterparty_stats: list[CounterpartyStat] = field(default_factory=list)
-    country_frequency: dict[str, int] = field(default_factory=dict)
-
     peer_group_deviation: float = 0.0
     suspicious_keyword_hit: bool = False
     high_risk_country_hit: bool = False
@@ -300,80 +279,12 @@ class BehaviorStats:
             "unique_counterparties_12m": self.unique_counterparties_12m,
             "new_counterparties_30d": self.new_counterparties_30d,
             "high_risk_counterparties_12m": self.high_risk_counterparties_12m,
-            "counterparty_stats": [c.to_dict() for c in self.counterparty_stats],
-            "country_frequency": self.country_frequency,
             "peer_group_deviation": self.peer_group_deviation,
             "suspicious_keyword_hit": self.suspicious_keyword_hit,
             "high_risk_country_hit": self.high_risk_country_hit,
             "risky_bank_hit": self.risky_bank_hit,
             "customer_last_12m_stats": self.customer_last_12m_stats.to_dict() if self.customer_last_12m_stats else None,
         }
-
-
-# ---------------------------------------------------------------------------
-# Counterparty profile
-# ---------------------------------------------------------------------------
-
-@dataclass
-class CounterpartyProfile:
-    type: str                        # private | business
-    risk_signals: list[str] = field(default_factory=list)
-    known_relationship: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "risk_signals": self.risk_signals,
-            "known_relationship": self.known_relationship,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Investigation context
-# ---------------------------------------------------------------------------
-
-@dataclass
-class InvestigationContext:
-    case_id: str
-    investigation_status: str         # open | in_review | closed
-    analyst_decision: str | None      # SAR | NO_SAR | ESCALATE | null
-    sar_recommended: bool
-    sar_reason: str
-    source_of_funds_summary: str
-    customer_statement: str
-    business_purpose: str
-    investigation_notes: str
-    rule_name_en: str
-    rule_name_de: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "case_id": self.case_id,
-            "investigation_status": self.investigation_status,
-            "analyst_decision": self.analyst_decision,
-            "sar_recommended": self.sar_recommended,
-            "sar_reason": self.sar_reason,
-            "source_of_funds_summary": self.source_of_funds_summary,
-            "customer_statement": self.customer_statement,
-            "business_purpose": self.business_purpose,
-            "investigation_notes": self.investigation_notes,
-            "rule_name_en": self.rule_name_en,
-            "rule_name_de": self.rule_name_de,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Attachments
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Attachment:
-    type: str          # invoice | screenshot | document
-    description: str
-    url: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"type": self.type, "description": self.description, "url": self.url}
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +331,6 @@ class Alert:
     trigger_transactions: list[TriggerTransaction]
     transaction_history: list[HistoryTransaction]
     behavior_stats: BehaviorStats
-    counterparty_profile: CounterpartyProfile
-    investigation_context: InvestigationContext
-    attachments: list[Attachment]
     account_summaries: list[AccountSummary]
 
     def to_dict(self) -> dict[str, Any]:
@@ -439,8 +347,5 @@ class Alert:
             "trigger_transactions": [t.to_dict() for t in self.trigger_transactions],
             "transaction_history": [t.to_dict() for t in self.transaction_history],
             "behavior_stats": self.behavior_stats.to_dict(),
-            "counterparty_profile": self.counterparty_profile.to_dict(),
-            "investigation_context": self.investigation_context.to_dict(),
-            "attachments": [a.to_dict() for a in self.attachments],
             "account_summaries": [a.to_dict() for a in self.account_summaries],
         }
