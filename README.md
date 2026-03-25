@@ -10,34 +10,35 @@ pip install -r requirements.txt
 
 ## Run
 
-Generate 10 alerts (combined file only):
-
-```bash
-python -m src.main
-```
-
-Generate 10 alerts and also write one JSON file per alert:
-
-```bash
-python -m src.main --per-alert
-```
-
-Alternatively, using the run script:
+Recommended (wrapper around `src.main`):
 
 ```bash
 python run.py
-python run.py --per-alert
+```
+
+Optional flags:
+
+```bash
+python run.py -n 50              # number of alerts (default: 20)
+python run.py --per-alert        # also write output/alert_001.json, …
+```
+
+Same behavior via the module:
+
+```bash
+python -m src.main
+python -m src.main -n 50 --per-alert
 ```
 
 ## Output
 
-- **`output/alerts.json`** – List of 10 alerts (always created). Each alert contains:
-  - `alert_id`, `type`, `status`, `created_at`, `risk_score`, `customer_id`, `account_id`, `requires_sar`
+- **`output/alerts.json`** – List of alerts (default 20; set with `-n`). Each alert contains:
+  - `alert_id`, `status`, `created_at`, customer profile, rules, transactions, etc.
   - `kyc` – customer KYC record
   - `alerted_transactions` – transactions that triggered the alert
   - `transaction_history` – full history for the account (includes alerted transactions)
   - `account_summaries` – account(s) linked to the alert
 
-- **`output/alert_001.json` … `output/alert_010.json`** – One file per alert (only when using `--per-alert`).
+- **`output/alert_001.json` …** – One file per alert (only with `--per-alert`; count matches `-n`).
 
 Output is written under the `output/` directory (created automatically if it does not exist).

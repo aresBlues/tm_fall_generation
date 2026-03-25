@@ -3,18 +3,14 @@
     "alert_id": "string",
     "created_at": "2026-02-02T14:28:12Z",
     "status": "open",
-    "risk_score": 0.0,
-    "requires_sar": false,
   
     "rules_triggered": [
       {
         "rule_id": "string",
         "rule_name_en": "string",
-        "rule_name_de": "string",
-        "score_contribution": 0.0
+        "rule_name_de": "string"
       }
     ],
-    "primary_rule_id": "string",
     "alert_reason_summary": "string",
   
     "customer_profile": {
@@ -78,15 +74,11 @@
         "payment_reference": "string",
         "type": "transfer | cash | wire | card",
   
-        "counterparty_name": "string",
-        "counterparty_iban": "string",
-        "counterparty_bic": "string",
-        "counterparty_bank_name": "string",
-        "counterparty_country_iso": "string (ISO2)",
-  
-        "cash_transaction_type": "deposit | withdrawal | null",
-        "atm_city": "string",
-        "atm_country": "string (ISO2)",
+        "counterparty_name": "string (\"-\" only when type is cash)",
+        "counterparty_iban": "string (\"-\" only when type is cash)",
+        "counterparty_bic": "string (\"-\" only when type is cash)",
+        "counterparty_bank_name": "string (\"-\" only when type is cash)",
+        "counterparty_country_iso": "string (ISO2; \"-\" only when type is cash)",
   
         "remaining_account_balance_after_tx": 0.0
       }
@@ -101,11 +93,11 @@
         "currency": "EUR",
         "direction": "in | out",
         "type": "transfer | wire | cash | card",
-        "counterparty_name": "string",
-        "counterparty_iban": "string",
-        "counterparty_bic": "string",
-        "counterparty_bank_name": "string",
-        "counterparty_country_iso": "string (ISO2)",
+        "counterparty_name": "string (\"-\" only when type is cash)",
+        "counterparty_iban": "string (\"-\" only when type is cash)",
+        "counterparty_bic": "string (\"-\" only when type is cash)",
+        "counterparty_bank_name": "string (\"-\" only when type is cash)",
+        "counterparty_country_iso": "string (ISO2; \"-\" only when type is cash)",
         "payment_reference": "string",
         "remaining_account_balance_after_tx": 0.0
       }

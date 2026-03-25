@@ -127,14 +127,12 @@ class RuleTriggered:
     rule_id: str
     rule_name_en: str
     rule_name_de: str
-    score_contribution: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "rule_id": self.rule_id,
             "rule_name_en": self.rule_name_en,
             "rule_name_de": self.rule_name_de,
-            "score_contribution": self.score_contribution,
         }
 
 
@@ -160,9 +158,6 @@ class TriggerTransaction:
     counterparty_bic: str
     counterparty_bank_name: str
     counterparty_country_iso: str           # ISO-2
-    cash_transaction_type: str | None       # deposit | withdrawal | null
-    atm_city: str | None
-    atm_country: str | None                 # ISO-2
     remaining_account_balance_after_tx: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -182,9 +177,6 @@ class TriggerTransaction:
             "counterparty_bic": self.counterparty_bic,
             "counterparty_bank_name": self.counterparty_bank_name,
             "counterparty_country_iso": self.counterparty_country_iso,
-            "cash_transaction_type": self.cash_transaction_type,
-            "atm_city": self.atm_city,
-            "atm_country": self.atm_country,
             "remaining_account_balance_after_tx": self.remaining_account_balance_after_tx,
         }
 
@@ -320,10 +312,7 @@ class Alert:
     alert_id: str
     created_at: str
     status: str                      # open | in_review | closed
-    risk_score: float
-    requires_sar: bool
 
-    primary_rule_id: str
     alert_reason_summary: str
 
     rules_triggered: list[RuleTriggered]
@@ -338,9 +327,6 @@ class Alert:
             "alert_id": self.alert_id,
             "created_at": self.created_at,
             "status": self.status,
-            "risk_score": self.risk_score,
-            "requires_sar": self.requires_sar,
-            "primary_rule_id": self.primary_rule_id,
             "alert_reason_summary": self.alert_reason_summary,
             "rules_triggered": [r.to_dict() for r in self.rules_triggered],
             "customer_profile": self.customer_profile.to_dict(),

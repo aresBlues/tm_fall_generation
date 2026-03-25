@@ -10,6 +10,7 @@ from __future__ import annotations
 import random
 from collections import defaultdict
 from datetime import datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from faker import Faker
@@ -81,6 +82,31 @@ ACCOUNT_PURPOSES = [
 
 HIGH_RISK_COUNTRIES = {"IR", "KP", "SY", "AF", "YE", "MM", "LY", "SO"}
 
+_MONEY_QUANT = Decimal("1")
+
+
+def _money_dec(value: float | Decimal | str) -> Decimal:
+    """Quantize to whole currency units (half-up)."""
+    if isinstance(value, Decimal):
+        d = value
+    else:
+        d = Decimal(str(value))
+    return d.quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _money_float(value: float | Decimal | str) -> float:
+    """JSON-safe float: monetary values with no fractional cents/units."""
+    return float(_money_dec(value))
+
+
+# Counterparty fields when type=cash (no third party on statement) — keep strings for downstream parsers
+COUNTERPARTY_NA = "-"
+
+
+def _is_cash_tx_type(tx_type: str) -> bool:
+    """Only `type: cash` omits counterparty (filled with '-'); other types keep generated CP."""
+    return tx_type == "cash"
+
 # Rule definitions per alert type  (rule_id, EN name, DE name)
 RULES_BY_TYPE: dict[str, list[tuple[str, str, str]]] = {
     "structuring": [
@@ -119,75 +145,186 @@ GERMAN_MONTHS = [
     "Juli", "August", "September", "Oktober", "November", "Dezember",
 ]
 
-_PAYMENT_REFS_IN_TRANSFER = [
-    "Gehalt {month} {year}",
-    "Miete {month} {year}",
-    "Mieteinnahme {month} {year}",
-    "Gutschrift Dauerauftrag",
-    "Rückerstattung Rechnung {ref}",
-    "Einzahlung Sparvertrag",
-    "Honorar {month} {year}",
-    "Provision Q{quarter}/{year}",
+# Plausible EUR bands (min, max inclusive) per template — keeps references aligned with amounts.
+_EUR_ANY_HI = 10_000_000.0
+
+# Short / generic references (no placeholders); wide band so they always qualify as fallback.
+_PAYMENT_REFS_GENERIC: list[tuple[str, float, float]] = [
+    ("Diverses", 0.0, _EUR_ANY_HI),
+    ("Unbekannt", 0.0, _EUR_ANY_HI),
+    ("Wie besprochen", 0.0, _EUR_ANY_HI),
+    ("Dankeschön", 0.0, _EUR_ANY_HI),
+    ("Gefälligkeit", 0.0, _EUR_ANY_HI),
+    ("Freundschaftsdienst", 0.0, _EUR_ANY_HI),
+    ("Rückzahlung", 0.0, _EUR_ANY_HI),
+    ("Schulden beglichen", 0.0, _EUR_ANY_HI),
+    ("Provision", 0.0, _EUR_ANY_HI),
+    ("Gebühr", 0.0, _EUR_ANY_HI),
+    ("Honorar", 0.0, _EUR_ANY_HI),
+    ("Privat", 0.0, _EUR_ANY_HI),
+    ("Ware", 0.0, _EUR_ANY_HI),
+    ("Dienstleistung erbracht", 0.0, _EUR_ANY_HI),
+    ("Familie", 0.0, _EUR_ANY_HI),
+    ("Family support", 0.0, _EUR_ANY_HI),
+    ("Tickets", 0.0, _EUR_ANY_HI),
+    ("Consulting Fee", 0.0, _EUR_ANY_HI),
+    ("Schulden", 0.0, _EUR_ANY_HI),
 ]
-_PAYMENT_REFS_OUT_TRANSFER = [
-    "Miete {month} {year}",
-    "Dauerauftrag Strom/Gas",
-    "Versicherungsbeitrag {month} {year}",
-    "Rechnung Nr. {ref}",
-    "Zahlung an {name}",
-    "Ratenzahlung Kredit {ref}",
-    "Telefonrechnung {month} {year}",
-    "Internet Rechnung {month}/{year}",
-    "Mitgliedsbeitrag {year}",
-    "KFZ-Steuer {year}",
+
+_PAYMENT_REFS_IN_TRANSFER: list[tuple[str, float, float]] = [
+    ("Gehalt {month} {year}", 1500.0, 12000.0),
+    ("Miete {month} {year}", 400.0, 2000.0),
+    ("Mieteinnahme {month} {year}", 400.0, 2000.0),
+    ("Mieteinnahme Gewerbe – {month} {year}", 5000.0, 25000.0),
+    ("Gutschrift Dauerauftrag", 50.0, 50000.0),
+    ("Rückerstattung Rechnung {ref}", 20.0, 50000.0),
+    ("Einzahlung Sparvertrag", 100.0, 200000.0),
+    ("Honorar {month} {year}", 500.0, 50000.0),
+    ("Provision Q{quarter}/{year}", 500.0, 100000.0),
+    ("Rückzahlung Urlaubskasse {year}", 100.0, 5000.0),
+    ("Reisekostenerstattung {month} {year} – Dienstreise {city}", 50.0, 5000.0),
+    ("Provisionszahlung Q{quarter} {year}", 500.0, 100000.0),
+    ("Freelancer-Honorar – Projekt bei {name}", 1000.0, 100000.0),
+    ("Lieferantenrechnung – Charge {ref_inv}", 5000.0, 500000.0),
+    ("Gutschrift – Rechnung Nr. {ref_inv}", 500.0, 500000.0),
+    ("Überweisung von {name}", 50.0, 500000.0),
+    ("Stromrechnung Q{quarter} {year} – Gutschrift Stadtwerke {city}", 40.0, 800.0),
+    ("Rückerstattung Steuer {year}", 100.0, 50000.0),
 ]
-_PAYMENT_REFS_CASH_IN = [
-    "Bargeldeinzahlung",
-    "Bargeldeinzahlung Filiale",
-    "Einzahlung am Automaten",
+
+_PAYMENT_REFS_OUT_TRANSFER: list[tuple[str, float, float]] = [
+    ("Miete {month} {year}", 400.0, 2000.0),
+    ("Miete {month} {year} – Wohnung {street}", 400.0, 2000.0),
+    ("Büromiete {month} {year} – {city}", 5000.0, 25000.0),
+    ("Dauerauftrag Strom/Gas", 40.0, 500.0),
+    ("Stromrechnung Q{quarter} {year} – Stadtwerke {city}", 40.0, 500.0),
+    ("Versicherungsbeitrag {month} {year}", 30.0, 900.0),
+    ("Rechnung Nr. {ref}", 500.0, 500000.0),
+    ("Rechnung Nr. {ref_inv}", 500.0, 500000.0),
+    ("Zahlung an {name}", 50.0, 500000.0),
+    ("Ratenzahlung Kredit {ref}", 100.0, 8000.0),
+    ("Telefonrechnung {month} {year}", 15.0, 200.0),
+    ("Handy-Rechnung Telekom {month} {year}", 15.0, 200.0),
+    ("Internet Rechnung {month}/{year}", 10.0, 120.0),
+    ("Mitgliedsbeitrag {year}", 30.0, 5000.0),
+    ("KFZ-Steuer {year}", 50.0, 5000.0),
+    ("Lagermiete {month} – Logistikzentrum {city}", 3000.0, 100000.0),
+    ("Kindergartenbeitrag {month} – {city}", 60.0, 600.0),
+    ("Überweisung Lieferant – Anzahlung Auftrag #{ref}", 5000.0, 500000.0),
+    ("Beratungshonorar – IT-Projekt Ref {ref}", 2000.0, 100000.0),
+    ("Jahresabonnement Microsoft 365 Business", 20.0, 400.0),
+    ("Arbeitnehmer-Anteil Sozialversicherung {month} {year}", 400.0, 2500.0),
+    ("Buchhaltersoftware DATEV – Monatslizenz {month} {year}", 30.0, 600.0),
+    ("Fortbildungsseminar – IHK {city}", 200.0, 8000.0),
+    ("Catering Betriebsfeier {month} – {name}", 500.0, 50000.0),
+    ("Fahrzeug-Leasing Rate {month} – {ref}", 200.0, 2500.0),
+    ("Messestand-Gebühr {city} {year}", 5000.0, 500000.0),
+    ("GEZ-Beitrag", 10.0, 30.0),
+    ("Sportverein Mitgliedsbeitrag {month}", 10.0, 250.0),
 ]
-_PAYMENT_REFS_CASH_OUT = [
-    "Bargeldauszahlung",
-    "Geldautomat {city}",
-    "ATM Auszahlung",
+
+_PAYMENT_REFS_CASH_IN: list[tuple[str, float, float]] = [
+    ("Bargeldeinzahlung", 50.0, 50000.0),
+    ("Bargeldeinzahlung Filiale", 50.0, 50000.0),
+    ("Einzahlung am Automaten", 20.0, 15000.0),
+    ("Bargeldeinzahlung – {city}", 50.0, 50000.0),
+    ("Urlaubsanzahlung – Hotel {city}", 100.0, 15000.0),
 ]
-_PAYMENT_REFS_CARD = [
-    "Kartenzahlung {name}",
-    "POS {name}",
-    "EC-Kartenzahlung {name}",
-    "Kontaktlos {name}",
+
+_PAYMENT_REFS_CASH_OUT: list[tuple[str, float, float]] = [
+    ("Bargeldauszahlung", 20.0, 1000.0),
+    ("Geldautomat {city}", 20.0, 1000.0),
+    ("ATM Auszahlung", 20.0, 1000.0),
+    ("Ausflug", 20.0, 1000.0),
+    ("Essen gehen", 10.0, 500.0),
+    ("Einkaufen", 10.0, 1000.0),
 ]
-_PAYMENT_REFS_WIRE = [
-    "Auslandsüberweisung {name}",
-    "SWIFT Transfer Ref {ref}",
-    "Internationale Zahlung {ref}",
-    "Wire Transfer an {name}",
+
+_PAYMENT_REFS_CARD: list[tuple[str, float, float]] = [
+    ("Kartenzahlung {name}", 5.0, 500.0),
+    ("POS {name}", 5.0, 500.0),
+    ("EC-Kartenzahlung {name}", 5.0, 500.0),
+    ("Kontaktlos {name}", 5.0, 500.0),
+    ("REWE Einkauf vom {date_dm}", 5.0, 500.0),
+    ("Amazon-Bestellung", 5.0, 2000.0),
+    ("Größerer Einzelhandels-Einkauf {name}", 500.0, 2000.0),
+    ("Monatliche Netflix-Gebühr", 5.0, 25.0),
+    ("Handy-Rechnung Telekom {month} {year}", 15.0, 200.0),
+    ("Fitnessstudio-Mitgliedschaft {month}", 10.0, 150.0),
+    ("Messestand-Gebühr {city} {year}", 5000.0, 500000.0),
+    ("Zahnarztrechnung – Behandlung {date_dm}", 50.0, 5000.0),
+    ("Geburtstagsgeschenk für {name}", 5.0, 500.0),
 ]
+
+_PAYMENT_REFS_WIRE: list[tuple[str, float, float]] = [
+    ("Auslandsüberweisung {name}", 1000.0, 1_000_000.0),
+    ("Auslandsüberweisung {name} Ref {ref_inv}", 1000.0, 1_000_000.0),
+    ("SWIFT Transfer Ref {ref}", 1000.0, 1_000_000.0),
+    ("Internationale Zahlung {ref}", 1000.0, 1_000_000.0),
+    ("Internationale Zahlung Auftrag #{ref}", 1000.0, 1_000_000.0),
+    ("Wire Transfer an {name}", 1000.0, 1_000_000.0),
+]
+
+
+def _filter_ref_templates_by_amount(pool: list[tuple[str, float, float]], amount: float) -> list[str]:
+    return [tpl for tpl, lo, hi in pool if lo <= amount <= hi]
+
+
+def _pick_ref_template(
+    pool: list[tuple[str, float, float]],
+    amount: float,
+    fallback: list[tuple[str, float, float]] | None = None,
+) -> str:
+    candidates = _filter_ref_templates_by_amount(pool, amount)
+    if candidates:
+        return random.choice(candidates)
+    if fallback is not None:
+        fb = _filter_ref_templates_by_amount(fallback, amount)
+        if fb:
+            return random.choice(fb)
+    generic = _filter_ref_templates_by_amount(_PAYMENT_REFS_GENERIC, amount)
+    if generic:
+        return random.choice(generic)
+    return random.choice([t for t, _, _ in _PAYMENT_REFS_GENERIC])
 
 
 def _generate_payment_reference(
-    tx_type: str, direction: str, dt: datetime, cp_name: str,
+    tx_type: str, direction: str, dt: datetime, cp_name: str, amount: float,
 ) -> str:
     month = GERMAN_MONTHS[dt.month - 1]
     year = dt.year
     quarter = (dt.month - 1) // 3 + 1
     ref = fake.numerify(text="#####")
+    date_dm = f"{dt.day:02d}.{dt.month:02d}.{dt.year}"
+    street = fake.street_address()
+    ref_inv = f"{year}-{fake.numerify(text='###')}"
+    city = fake.city()
+    name_for_template = "" if cp_name == COUNTERPARTY_NA else cp_name
 
-    if tx_type == "cash":
+    if random.random() < 0.12:
+        template = _pick_ref_template(_PAYMENT_REFS_GENERIC, amount)
+    elif tx_type == "cash":
         pool = _PAYMENT_REFS_CASH_IN if direction == "in" else _PAYMENT_REFS_CASH_OUT
+        template = _pick_ref_template(pool, amount, fallback=_PAYMENT_REFS_GENERIC)
     elif tx_type == "card":
-        pool = _PAYMENT_REFS_CARD
+        template = _pick_ref_template(_PAYMENT_REFS_CARD, amount, fallback=_PAYMENT_REFS_GENERIC)
     elif tx_type == "wire":
-        pool = _PAYMENT_REFS_WIRE
+        template = _pick_ref_template(_PAYMENT_REFS_WIRE, amount, fallback=_PAYMENT_REFS_GENERIC)
     elif direction == "in":
-        pool = _PAYMENT_REFS_IN_TRANSFER
+        template = _pick_ref_template(_PAYMENT_REFS_IN_TRANSFER, amount, fallback=_PAYMENT_REFS_GENERIC)
     else:
-        pool = _PAYMENT_REFS_OUT_TRANSFER
+        template = _pick_ref_template(_PAYMENT_REFS_OUT_TRANSFER, amount, fallback=_PAYMENT_REFS_GENERIC)
 
-    template = random.choice(pool)
     return template.format(
-        month=month, year=year, quarter=quarter,
-        ref=ref, name=cp_name, city=fake.city(),
+        month=month,
+        year=year,
+        quarter=quarter,
+        ref=ref,
+        ref_inv=ref_inv,
+        name=name_for_template,
+        city=city,
+        date_dm=date_dm,
+        street=street,
     )
 
 
@@ -224,7 +361,7 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
         num_ubo = random.randint(1, 3)
         remaining = 100.0
         for j in range(num_ubo):
-            pct = round(random.uniform(10, remaining - 10 * (num_ubo - j - 1)), 1) if j < num_ubo - 1 else round(remaining, 1)
+            pct = round(random.uniform(10, remaining - 10 * (num_ubo - j - 1)), 0) if j < num_ubo - 1 else round(remaining, 0)
             remaining -= pct
             ubo.append(UBO(name=fake.name(), ownership_percentage=pct))
 
@@ -268,17 +405,14 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
 # Rules triggered
 # ---------------------------------------------------------------------------
 
-def generate_rules_triggered(alert_type: str, risk_score: float) -> list[RuleTriggered]:
+def generate_rules_triggered(alert_type: str) -> list[RuleTriggered]:
     pool = RULES_BY_TYPE.get(alert_type, RULES_BY_TYPE["unusual_pattern"])
     n = min(len(pool), random.randint(1, 2))
     chosen = random.sample(pool, n)
-    rules = []
-    remaining_score = risk_score
-    for i, (rid, en, de) in enumerate(chosen):
-        contrib = round(remaining_score / (n - i), 2) if i < n - 1 else round(remaining_score, 2)
-        remaining_score -= contrib
-        rules.append(RuleTriggered(rule_id=rid, rule_name_en=en, rule_name_de=de, score_contribution=contrib))
-    return rules
+    return [
+        RuleTriggered(rule_id=rid, rule_name_en=en, rule_name_de=de)
+        for rid, en, de in chosen
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +423,7 @@ def generate_account_summary(account_id: str, currency: str, balance: float) -> 
     opened = fake.date_between(start_date="-8y", end_date="-6m")
     return AccountSummary(
         account_id=account_id,
-        balance=round(balance, 2),
+        balance=_money_float(balance),
         currency=currency,
         account_type=random.choice(ACCOUNT_TYPES),
         opened_at=opened.isoformat(),
@@ -337,6 +471,26 @@ class _InternalTx:
 def _random_dt_between(start: datetime, end: datetime) -> datetime:
     delta = (end - start).total_seconds()
     return start + timedelta(seconds=random.uniform(0, max(delta, 1)))
+
+
+def _truncated_gauss(
+    lo: float,
+    hi: float,
+    mu: float | None = None,
+    sigma: float | None = None,
+) -> Decimal:
+    """Sample from a Gaussian, rejecting until the value lies in [lo, hi]; return whole-unit Decimal."""
+    if hi <= lo:
+        return _money_dec(lo)
+    if mu is None:
+        mu = (lo + hi) / 2.0
+    if sigma is None:
+        sigma = max((hi - lo) / 6.0, 1e-6)
+    for _ in range(300):
+        x = random.gauss(mu, sigma)
+        if lo <= x <= hi:
+            return _money_dec(x)
+    return _money_dec(random.uniform(lo, hi))
 
 
 def _iban_country(iban: str) -> str:
@@ -466,43 +620,59 @@ def _generate_tx_pool(
     # -- Sort chronologically and assign amounts via running balance ---------
     pool.sort(key=lambda t: t.dt)
 
-    balance = opening_balance
+    balance = _money_dec(opening_balance)
     for tx in pool:
+        amt: Decimal
         if tx.direction == "out":
-            # Determine max amount allowed
-            max_out = balance  # keep balance >= 0
+            max_out = balance
             if max_out <= 0:
-                # Flip to inbound if we can't afford any outflow
                 tx.direction = "in"
-                tx.amount = round(random.uniform(500, 5000), 2)
-                balance += tx.amount
+                amt = _truncated_gauss(500.0, 5000.0)
+                balance = balance + amt
             else:
                 if tx.is_trigger and alert_type == "structuring":
-                    desired = round(random.uniform(8000, 9500), 2)
-                    tx.amount = min(desired, max_out)
+                    desired = _truncated_gauss(
+                        8000.0, 9500.0, mu=8750.0, sigma=(9500.0 - 8000.0) / 6.0,
+                    )
+                    amt = min(desired, max_out)
                 elif tx.is_trigger and alert_type == "large_single_transaction":
-                    desired = round(random.uniform(100000, 500000), 2)
-                    tx.amount = min(desired, max_out)
+                    desired = _truncated_gauss(
+                        100000.0, 500000.0, mu=300000.0, sigma=(500000.0 - 100000.0) / 6.0,
+                    )
+                    amt = min(desired, max_out)
                 else:
-                    upper = min(15000.0, max_out)
-                    tx.amount = round(random.uniform(50, max(50, upper)), 2)
-                balance -= tx.amount
-        else:  # direction == "in"
+                    upper = min(Decimal("15000"), max_out)
+                    hi = max(Decimal("50"), upper)
+                    amt = _truncated_gauss(50.0, float(hi))
+                balance = balance - amt
+        else:
             if tx.is_trigger and alert_type == "large_single_transaction":
-                tx.amount = round(random.uniform(100000, 500000), 2)
+                amt = _truncated_gauss(
+                    100000.0, 500000.0, mu=300000.0, sigma=(500000.0 - 100000.0) / 6.0,
+                )
             else:
-                tx.amount = round(random.uniform(50, 15000), 2)
-            balance += tx.amount
+                amt = _truncated_gauss(50.0, 15000.0)
+            balance = balance + amt
 
-        tx.balance_after = round(balance, 2)
+        tx.amount = _money_float(amt)
+        tx.balance_after = _money_float(balance)
+
+    # -- type=cash only: no counterparty on statement (placeholder for downstream) --
+    for tx in pool:
+        if _is_cash_tx_type(tx.tx_type):
+            tx.cp_name = COUNTERPARTY_NA
+            tx.cp_iban = COUNTERPARTY_NA
+            tx.cp_bic = COUNTERPARTY_NA
+            tx.cp_bank = COUNTERPARTY_NA
+            tx.cp_country = COUNTERPARTY_NA
 
     # -- Assign payment references (after balance walk, direction is final) --
     for tx in pool:
         tx.payment_reference = _generate_payment_reference(
-            tx.tx_type, tx.direction, tx.dt, tx.cp_name,
+            tx.tx_type, tx.direction, tx.dt, tx.cp_name, tx.amount,
         )
 
-    return pool, round(balance, 2)
+    return pool, _money_float(balance)
 
 
 # ---------------------------------------------------------------------------
@@ -560,45 +730,55 @@ def compute_behavior_stats(
             amounts_3m.append(tx.amount)
 
         # Counterparty tracking (for unique/new/high-risk counts)
-        name = tx.cp_name
-        dt_str = tx.dt.strftime("%Y-%m-%d")
-        if name not in cp_first_seen or dt_str < cp_first_seen[name]:
-            cp_first_seen[name] = dt_str
-        cp_country[name] = tx.cp_country
-        cp_freq[name] += 1
+        if tx.cp_name != COUNTERPARTY_NA:
+            name = tx.cp_name
+            dt_str = tx.dt.strftime("%Y-%m-%d")
+            if name not in cp_first_seen or dt_str < cp_first_seen[name]:
+                cp_first_seen[name] = dt_str
+            cp_country[name] = tx.cp_country
+            cp_freq[name] += 1
 
-    avg_3m = round(sum(amounts_3m) / len(amounts_3m), 2) if amounts_3m else 0.0
+    avg_3m = (
+        _money_float(sum(amounts_3m) / len(amounts_3m)) if amounts_3m else 0.0
+    )
     trigger_amounts = [tx.amount for tx in pool if tx.is_trigger]
     avg_trigger = sum(trigger_amounts) / len(trigger_amounts) if trigger_amounts else avg_3m
-    multiplier = round(avg_trigger / avg_3m, 2) if avg_3m > 0 else 1.0
+    multiplier = _money_float(avg_trigger / avg_3m) if avg_3m > 0 else 1.0
 
     all_cps = set(cp_freq.keys())
-    new_30d_names = {tx.cp_name for tx in pool if d30 <= tx.dt <= now}
+    new_30d_names = {
+        tx.cp_name for tx in pool
+        if d30 <= tx.dt <= now and tx.cp_name != COUNTERPARTY_NA
+    }
     old_names = {n for n, fs in cp_first_seen.items() if fs < d30.strftime("%Y-%m-%d")}
     new_cps_30d = new_30d_names - old_names
     hr_cps = {n for n, c in cp_country.items() if c in HIGH_RISK_COUNTRIES}
 
-    has_hr_country = any(tx.cp_country in HIGH_RISK_COUNTRIES for tx in pool if tx.is_trigger)
+    has_hr_country = any(
+        tx.cp_country in HIGH_RISK_COUNTRIES
+        for tx in pool
+        if tx.is_trigger and tx.cp_country != COUNTERPARTY_NA
+    )
 
     return BehaviorStats(
         transaction_count_7d=count_7d,
         transaction_count_30d=count_30d,
-        cash_in_12m=round(cash_in_12m, 2),
-        cash_out_12m=round(cash_out_12m, 2),
-        incoming_volume_30d=round(in_vol_30d, 2),
-        outgoing_volume_30d=round(out_vol_30d, 2),
+        cash_in_12m=_money_float(cash_in_12m),
+        cash_out_12m=_money_float(cash_out_12m),
+        incoming_volume_30d=_money_float(in_vol_30d),
+        outgoing_volume_30d=_money_float(out_vol_30d),
         avg_tx_amount_3m=avg_3m,
         amount_multiplier_vs_3m=multiplier,
         unique_counterparties_12m=len(all_cps),
         new_counterparties_30d=len(new_cps_30d),
         high_risk_counterparties_12m=len(hr_cps),
-        peer_group_deviation=round(random.uniform(-2.0, 3.0), 2),
+        peer_group_deviation=round(random.uniform(-2.0, 3.0), 0),
         suspicious_keyword_hit=random.random() < 0.1,
         high_risk_country_hit=has_hr_country,
         risky_bank_hit=random.random() < 0.05,
         customer_last_12m_stats=CustomerLast12mStats(
-            total_volume=round(total_vol_12m, 2),
-            avg_monthly_volume=round(total_vol_12m / 12, 2),
+            total_volume=_money_float(total_vol_12m),
+            avg_monthly_volume=_money_float(total_vol_12m / 12),
             txn_count=txn_count_12m,
         ),
     )
@@ -625,9 +805,6 @@ def _to_trigger(tx: _InternalTx) -> TriggerTransaction:
         counterparty_bic=tx.cp_bic,
         counterparty_bank_name=tx.cp_bank,
         counterparty_country_iso=tx.cp_country,
-        cash_transaction_type=tx.cash_tx_type,
-        atm_city=tx.atm_city,
-        atm_country=tx.atm_country,
         remaining_account_balance_after_tx=tx.balance_after,
     )
 
@@ -665,15 +842,11 @@ def generate_alert(alert_index: int) -> Alert:
     status = random.choice(ALERT_STATUSES)
     created_at_dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
     created_at = created_at_dt.isoformat()
-    risk_score = round(random.uniform(0.3, 0.95), 2)
-    requires_sar = alert_index in (1, 6)
-
     # Customer
     profile = generate_customer_profile(customer_id)
 
     # Rules
-    rules = generate_rules_triggered(alert_type, risk_score)
-    primary_rule_id = rules[0].rule_id if rules else ""
+    rules = generate_rules_triggered(alert_type)
 
     # Currency — mostly EUR
     currency = random.choices(CURRENCIES, weights=[80, 10, 10])[0]
@@ -682,7 +855,9 @@ def generate_alert(alert_index: int) -> Alert:
     num_trigger = 1 if alert_type == "large_single_transaction" else random.randint(2, 5)
 
     # Opening balance
-    opening_balance = round(random.uniform(5000, 150000), 2)
+    opening_balance = _money_float(
+        _truncated_gauss(5000.0, 150000.0, mu=77500.0, sigma=(150000.0 - 5000.0) / 6.0),
+    )
 
     # Build 12-month pool with running balance
     pool, final_balance = _generate_tx_pool(account_id, currency, opening_balance, alert_type, num_trigger)
@@ -695,7 +870,9 @@ def generate_alert(alert_index: int) -> Alert:
     secondary_pool: list[_InternalTx] = []
     if random.random() < 0.3:
         extra_id = f"ACC-{alert_index:05d}-{random.randint(2000000, 2999999)}"
-        extra_opening = round(random.uniform(1000, 50000), 2)
+        extra_opening = _money_float(
+            _truncated_gauss(1000.0, 50000.0, mu=25500.0, sigma=(50000.0 - 1000.0) / 6.0),
+        )
         secondary_pool, extra_final = _generate_tx_pool(
             extra_id, currency, extra_opening, alert_type,
             num_trigger=0, num_background=random.randint(10, 25),
@@ -717,9 +894,6 @@ def generate_alert(alert_index: int) -> Alert:
         alert_id=alert_id,
         created_at=created_at,
         status=status,
-        risk_score=risk_score,
-        requires_sar=requires_sar,
-        primary_rule_id=primary_rule_id,
         alert_reason_summary=ALERT_REASON_SUMMARIES.get(alert_type, ""),
         rules_triggered=rules,
         customer_profile=profile,
