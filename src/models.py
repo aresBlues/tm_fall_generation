@@ -190,6 +190,8 @@ class HistoryTransaction:
     amount: float
     currency: str
     direction: str               # in | out
+    payment_rail: str            # SEPA_CT | SEPA_INST | CARD_POS | ATM_WITHDRAWAL | CASH_DEPOSIT | SWIFT
+    booking_channel: str         # mobile | online_banking | atm | card_terminal
     type: str                    # transfer | wire | cash | card
     counterparty_name: str
     counterparty_iban: str
@@ -207,6 +209,8 @@ class HistoryTransaction:
             "amount": self.amount,
             "currency": self.currency,
             "direction": self.direction,
+            "payment_rail": self.payment_rail,
+            "booking_channel": self.booking_channel,
             "type": self.type,
             "counterparty_name": self.counterparty_name,
             "counterparty_iban": self.counterparty_iban,

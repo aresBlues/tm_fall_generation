@@ -67,7 +67,35 @@ ACCOUNT_STATUSES = ["active", "blocked", "closed"]
 PAYMENT_RAILS = ["SEPA_CT", "SEPA_INST", "CARD_POS", "ATM_WITHDRAWAL", "CASH_DEPOSIT", "SWIFT"]
 BOOKING_CHANNELS = ["mobile", "online_banking", "atm", "card_terminal"]
 TX_TYPES = ["transfer", "cash", "wire", "card"]
-CURRENCIES = ["EUR", "CHF", "USD"]
+
+# Coherent triples (type, rail, channel): every transaction uses one row so rail matches type and channel.
+_COHERENT_INBOUND: list[tuple[str, str, str]] = [
+    ("transfer", "SEPA_CT", "online_banking"),
+    ("transfer", "SEPA_CT", "mobile"),
+    ("transfer", "SEPA_INST", "online_banking"),
+    ("transfer", "SEPA_INST", "mobile"),
+    ("card", "CARD_POS", "card_terminal"),
+    ("card", "CARD_POS", "mobile"),
+    ("cash", "CASH_DEPOSIT", "atm"),
+    ("wire", "SWIFT", "online_banking"),
+    ("wire", "SWIFT", "mobile"),
+]
+_COHERENT_OUTBOUND: list[tuple[str, str, str]] = [
+    ("transfer", "SEPA_CT", "online_banking"),
+    ("transfer", "SEPA_CT", "mobile"),
+    ("transfer", "SEPA_INST", "online_banking"),
+    ("transfer", "SEPA_INST", "mobile"),
+    ("card", "CARD_POS", "card_terminal"),
+    ("card", "CARD_POS", "mobile"),
+    ("cash", "ATM_WITHDRAWAL", "atm"),
+    ("wire", "SWIFT", "online_banking"),
+    ("wire", "SWIFT", "mobile"),
+]
+_COHERENT_UNION: list[tuple[str, str, str]] = list(
+    dict.fromkeys([*_COHERENT_INBOUND, *_COHERENT_OUTBOUND]),
+)
+
+ACCOUNT_CURRENCY = "EUR"
 ID_DOC_TYPES = ["passport", "national_id", "residence_permit"]
 KYC_STATUSES = ["VERIFIED", "PENDING", "REJECTED"]
 EMPLOYMENT_STATUSES = ["EMPLOYED", "SELF_EMPLOYED", "UNEMPLOYED", "STUDENT", "RETIRED"]
@@ -79,6 +107,16 @@ ACCOUNT_PURPOSES = [
     "daily expenses", "salary account", "business operations",
     "savings", "investment", "international transfers",
 ]
+
+# Consumer mail domains — GMX weighted higher than Yahoo / Gmail / Hotmail.
+_CUSTOMER_EMAIL_DOMAIN_WEIGHTS: tuple[tuple[str, int], ...] = (
+    ("gmx.de", 35),
+    ("gmx.net", 25),
+    ("yahoo.de", 12),
+    ("gmail.com", 14),
+    ("hotmail.com", 14),
+)
+_CUSTOMER_EMAIL_DOMAINS = [d for d, w in _CUSTOMER_EMAIL_DOMAIN_WEIGHTS for _ in range(w)]
 
 HIGH_RISK_COUNTRIES = {"IR", "KP", "SY", "AF", "YE", "MM", "LY", "SO"}
 
@@ -106,6 +144,55 @@ COUNTERPARTY_NA = "-"
 def _is_cash_tx_type(tx_type: str) -> bool:
     """Only `type: cash` omits counterparty (filled with '-'); other types keep generated CP."""
     return tx_type == "cash"
+
+
+def _apply_cash_auxiliary_fields(tx: _InternalTx) -> None:
+    if tx.payment_rail in ("CASH_DEPOSIT", "ATM_WITHDRAWAL"):
+        tx.cash_tx_type = "deposit" if tx.payment_rail == "CASH_DEPOSIT" else "withdrawal"
+        tx.atm_city = fake.city()
+        tx.atm_country = "DE"
+    else:
+        tx.cash_tx_type = None
+        tx.atm_city = None
+        tx.atm_country = None
+
+
+def _set_coherent_profile(tx: _InternalTx, profile: tuple[str, str, str]) -> None:
+    tx.tx_type, tx.payment_rail, tx.booking_channel = profile
+    _apply_cash_auxiliary_fields(tx)
+
+
+def _pick_weighted_coherent_profile() -> tuple[str, str, str]:
+    """Background / generic triggers: mostly domestic transfer, then card, cash, intl wire."""
+    roll = random.random()
+    if roll < 0.52:
+        opts = [p for p in _COHERENT_UNION if p[0] == "transfer"]
+    elif roll < 0.72:
+        opts = [p for p in _COHERENT_UNION if p[0] == "card"]
+    elif roll < 0.86:
+        opts = [p for p in _COHERENT_UNION if p[0] == "cash"]
+    else:
+        opts = [p for p in _COHERENT_UNION if p[0] == "wire"]
+    return random.choice(opts)
+
+
+def _assign_profile_and_direction_for_new_tx(tx: _InternalTx, profile: tuple[str, str, str]) -> None:
+    _set_coherent_profile(tx, profile)
+    if tx.payment_rail == "CASH_DEPOSIT":
+        tx.direction = "in"
+    elif tx.payment_rail == "ATM_WITHDRAWAL":
+        tx.direction = "out"
+    else:
+        tx.direction = random.choice(["in", "out"])
+
+
+def _coherence_repair_rail_vs_direction(tx: _InternalTx) -> None:
+    """After balance walk, fix impossible pairs (e.g. ATM withdrawal shown as inbound)."""
+    if tx.payment_rail == "ATM_WITHDRAWAL" and tx.direction == "in":
+        _set_coherent_profile(tx, random.choice(_COHERENT_INBOUND))
+    elif tx.payment_rail == "CASH_DEPOSIT" and tx.direction == "out":
+        _set_coherent_profile(tx, random.choice(_COHERENT_OUTBOUND))
+
 
 # Rule definitions per alert type  (rule_id, EN name, DE name)
 RULES_BY_TYPE: dict[str, list[tuple[str, str, str]]] = {
@@ -378,7 +465,7 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
         residency_country="DE",
         kyc_status=random.choices(KYC_STATUSES, weights=[85, 10, 5])[0],
         customer_since=fake.date_between(start_date="-10y", end_date="-1y").isoformat(),
-        email=fake.email(),
+        email=fake.email(domain=random.choice(_CUSTOMER_EMAIL_DOMAINS)),
         phone_number=fake.phone_number(),
         legal_address=legal,
         id_document=IdDocument(
@@ -497,6 +584,52 @@ def _iban_country(iban: str) -> str:
     return iban[:2] if len(iban) >= 2 else "DE"
 
 
+# Counterparty Faker locales (EUR accounts only): Germany + France IBAN/BIC pools.
+_EUR_FAKER_LOCALES: tuple[str, ...] = ("de_DE", "fr_FR")
+
+_FAKER_BY_LOCALE: dict[str, Faker] = {}
+
+
+def _faker_locale(locale: str) -> Faker:
+    """Single Faker instance per allowed locale (counterparty paths only)."""
+    if locale not in _FAKER_BY_LOCALE:
+        _FAKER_BY_LOCALE[locale] = Faker(locale)
+    return _FAKER_BY_LOCALE[locale]
+
+
+def _bic_for_country_code(country_iso2: str) -> str:
+    """8-char SWIFT-style BIC with ISO country at positions 5–6."""
+    lf = _faker_locale(random.choice(_EUR_FAKER_LOCALES))
+    bank4 = lf.bothify(text="????").upper()
+    loc2 = lf.bothify(text="??").upper()
+    return f"{bank4}{country_iso2.upper()}{loc2}"
+
+
+def _eur_counterparty_banking_fields() -> tuple[str, str, str, str]:
+    """(iban, country_iso2, bic, bank_name) for EUR-denominated accounts."""
+    loc = random.choice(_EUR_FAKER_LOCALES)
+    lf = _faker_locale(loc)
+    iban = lf.iban()
+    country = _iban_country(iban)
+    bic = lf.swift8()
+    bank = lf.company() + " Bank"
+    return iban, country, bic, bank
+
+
+def _counterparty_name_faker() -> Faker:
+    return _faker_locale(random.choice(_EUR_FAKER_LOCALES))
+
+
+def _fill_counterparty_non_cash(tx: _InternalTx) -> None:
+    nf = _counterparty_name_faker()
+    tx.cp_name = nf.company() if random.random() > 0.3 else nf.name()
+    iban, country, bic, bank = _eur_counterparty_banking_fields()
+    tx.cp_iban = iban
+    tx.cp_country = country
+    tx.cp_bic = bic
+    tx.cp_bank = bank
+
+
 # ---------------------------------------------------------------------------
 # Transaction pool generation (12-month + trigger shaping)
 # ---------------------------------------------------------------------------
@@ -529,30 +662,16 @@ def _generate_tx_pool(
         tx.tx_id = f"TX-{account_id}-{tx_counter:04d}"
         tx.dt = _random_dt_between(HISTORY_START, GENERATION_NOW)
         tx.currency = currency
-        tx.direction = random.choice(["in", "out"])
-        tx.tx_type = random.choice(TX_TYPES)
-        tx.payment_rail = random.choice(PAYMENT_RAILS)
-        tx.booking_channel = random.choice(BOOKING_CHANNELS)
-        tx.cp_name = fake.company() if random.random() > 0.3 else fake.name()
-        tx.cp_iban = fake.iban()
-        tx.cp_country = _iban_country(tx.cp_iban)
-        tx.cp_bic = fake.bothify(text="????DE##???")
-        tx.cp_bank = fake.company() + " Bank"
         tx.is_trigger = False
-
-        # Cash-specific
-        if tx.payment_rail in ("CASH_DEPOSIT", "ATM_WITHDRAWAL"):
-            tx.cash_tx_type = "deposit" if tx.payment_rail == "CASH_DEPOSIT" else "withdrawal"
-            tx.atm_city = fake.city()
-            tx.atm_country = "DE"
-            if tx.payment_rail == "CASH_DEPOSIT":
-                tx.direction = "in"
-            else:
-                tx.direction = "out"
+        _assign_profile_and_direction_for_new_tx(tx, _pick_weighted_coherent_profile())
+        if _is_cash_tx_type(tx.tx_type):
+            tx.cp_name = COUNTERPARTY_NA
+            tx.cp_iban = COUNTERPARTY_NA
+            tx.cp_bic = COUNTERPARTY_NA
+            tx.cp_bank = COUNTERPARTY_NA
+            tx.cp_country = COUNTERPARTY_NA
         else:
-            tx.cash_tx_type = None
-            tx.atm_city = None
-            tx.atm_country = None
+            _fill_counterparty_non_cash(tx)
 
         pool.append(tx)
 
@@ -565,53 +684,53 @@ def _generate_tx_pool(
         tx.tx_id = f"TX-{account_id}-{tx_counter:04d}"
         tx.currency = currency
         tx.is_trigger = True
-        tx.cp_name = fake.company() if random.random() > 0.3 else fake.name()
-        tx.cp_iban = fake.iban()
-        tx.cp_country = _iban_country(tx.cp_iban)
-        tx.cp_bic = fake.bothify(text="????DE##???")
-        tx.cp_bank = fake.company() + " Bank"
-        tx.booking_channel = random.choice(BOOKING_CHANNELS)
-
-        # Shape by alert type
+        # Shape by alert type (coherent type / rail / channel)
         if alert_type == "structuring":
             tx.dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
+            sepa_out = [p for p in _COHERENT_OUTBOUND if p[0] == "transfer" and p[1] == "SEPA_CT"]
+            _set_coherent_profile(tx, random.choice(sepa_out))
             tx.direction = "out"
-            tx.tx_type = "transfer"
-            tx.payment_rail = "SEPA_CT"
             # Amount set during balance walk (8000–9500)
         elif alert_type == "velocity":
             base = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_START + timedelta(days=20))
             tx.dt = base + timedelta(hours=i * 2)
-            tx.direction = random.choice(["in", "out"])
-            tx.tx_type = random.choice(TX_TYPES)
-            tx.payment_rail = random.choice(PAYMENT_RAILS)
+            _assign_profile_and_direction_for_new_tx(tx, _pick_weighted_coherent_profile())
         elif alert_type == "high_risk_country":
             tx.dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
+            wire_out = [p for p in _COHERENT_OUTBOUND if p[0] == "wire"]
+            _set_coherent_profile(tx, random.choice(wire_out))
             tx.direction = "out"
-            tx.tx_type = "wire"
-            tx.payment_rail = "SWIFT"
             tx.cp_country = random.choice(list(HIGH_RISK_COUNTRIES))
-            tx.cp_iban = tx.cp_country + fake.bothify(text="####################")
+            tx.cp_iban = tx.cp_country + _faker_locale(
+                random.choice(_EUR_FAKER_LOCALES),
+            ).bothify(text="####################")
         elif alert_type == "large_single_transaction":
             tx.dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
             tx.direction = random.choice(["in", "out"])
-            tx.tx_type = "wire"
-            tx.payment_rail = "SWIFT"
+            if tx.direction == "in":
+                wire_in = [p for p in _COHERENT_INBOUND if p[0] == "wire"]
+                _set_coherent_profile(tx, random.choice(wire_in))
+            else:
+                wire_out = [p for p in _COHERENT_OUTBOUND if p[0] == "wire"]
+                _set_coherent_profile(tx, random.choice(wire_out))
         else:  # unusual_pattern
             tx.dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
-            tx.direction = random.choice(["in", "out"])
-            tx.tx_type = random.choice(TX_TYPES)
-            tx.payment_rail = random.choice(PAYMENT_RAILS)
+            _assign_profile_and_direction_for_new_tx(tx, _pick_weighted_coherent_profile())
 
-        # Cash specifics for trigger
-        if tx.payment_rail in ("CASH_DEPOSIT", "ATM_WITHDRAWAL"):
-            tx.cash_tx_type = "deposit" if tx.payment_rail == "CASH_DEPOSIT" else "withdrawal"
-            tx.atm_city = fake.city()
-            tx.atm_country = "DE"
+        if alert_type != "high_risk_country":
+            if _is_cash_tx_type(tx.tx_type):
+                tx.cp_name = COUNTERPARTY_NA
+                tx.cp_iban = COUNTERPARTY_NA
+                tx.cp_bic = COUNTERPARTY_NA
+                tx.cp_bank = COUNTERPARTY_NA
+                tx.cp_country = COUNTERPARTY_NA
+            else:
+                _fill_counterparty_non_cash(tx)
         else:
-            tx.cash_tx_type = None
-            tx.atm_city = None
-            tx.atm_country = None
+            hf = _faker_locale(random.choice(_EUR_FAKER_LOCALES))
+            tx.cp_name = hf.company() if random.random() > 0.3 else hf.name()
+            tx.cp_bic = _bic_for_country_code(tx.cp_country)
+            tx.cp_bank = hf.company() + " Bank"
 
         trigger_txs.append(tx)
 
@@ -657,7 +776,9 @@ def _generate_tx_pool(
         tx.amount = _money_float(amt)
         tx.balance_after = _money_float(balance)
 
-    # -- type=cash only: no counterparty on statement (placeholder for downstream) --
+    for tx in pool:
+        _coherence_repair_rail_vs_direction(tx)
+
     for tx in pool:
         if _is_cash_tx_type(tx.tx_type):
             tx.cp_name = COUNTERPARTY_NA
@@ -665,6 +786,8 @@ def _generate_tx_pool(
             tx.cp_bic = COUNTERPARTY_NA
             tx.cp_bank = COUNTERPARTY_NA
             tx.cp_country = COUNTERPARTY_NA
+        elif tx.cp_name == COUNTERPARTY_NA or tx.cp_iban == COUNTERPARTY_NA:
+            _fill_counterparty_non_cash(tx)
 
     # -- Assign payment references (after balance walk, direction is final) --
     for tx in pool:
@@ -817,6 +940,8 @@ def _to_history(tx: _InternalTx) -> HistoryTransaction:
         amount=tx.amount,
         currency=tx.currency,
         direction=tx.direction,
+        payment_rail=tx.payment_rail,
+        booking_channel=tx.booking_channel,
         type=tx.tx_type,
         counterparty_name=tx.cp_name,
         counterparty_iban=tx.cp_iban,
@@ -848,8 +973,7 @@ def generate_alert(alert_index: int) -> Alert:
     # Rules
     rules = generate_rules_triggered(alert_type)
 
-    # Currency — mostly EUR
-    currency = random.choices(CURRENCIES, weights=[80, 10, 10])[0]
+    currency = ACCOUNT_CURRENCY
 
     # Number of trigger transactions
     num_trigger = 1 if alert_type == "large_single_transaction" else random.randint(2, 5)

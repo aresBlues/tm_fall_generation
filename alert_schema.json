@@ -92,6 +92,8 @@
         "amount": 0.0,
         "currency": "EUR",
         "direction": "in | out",
+        "payment_rail": "SEPA_CT | SEPA_INST | CARD_POS | ATM_WITHDRAWAL | CASH_DEPOSIT | SWIFT",
+        "booking_channel": "mobile | online_banking | atm | card_terminal",
         "type": "transfer | wire | cash | card",
         "counterparty_name": "string (\"-\" only when type is cash)",
         "counterparty_iban": "string (\"-\" only when type is cash)",
