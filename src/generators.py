@@ -7,53 +7,20 @@ fall within a single 1-month alert window.  Running account balance is maintaine
 """
 from __future__ import annotations
 
-import json
 import random
-import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, NamedTuple
 
 from faker import Faker
-
-_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent / "debug-547612.log"
-
-
-def _agent_debug_log(hypothesis_id: str, data: dict[str, Any]) -> None:
-    # region agent log
-    try:
-        payload = {
-            "sessionId": "547612",
-            "hypothesisId": hypothesis_id,
-            "timestamp": int(time.time() * 1000),
-            "location": "generators.py:_id_expiry_plus_years",
-            "data": data,
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _df:
-            _df.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # endregion
 
 
 def _id_expiry_plus_years(issued: date, years: int = 10) -> date:
     """ID document expiry = issued + `years`. Safe when issued is Feb 29 and target year is not a leap year."""
     try:
         return issued.replace(year=issued.year + years)
-    except ValueError as e:
-        # region agent log
-        _agent_debug_log(
-            "H1",
-            {
-                "issued": issued.isoformat(),
-                "target_year": issued.year + years,
-                "error": str(e),
-                "note": "Feb29_to_non_leap",
-            },
-        )
-        # endregion
+    except ValueError:
         return issued.replace(year=issued.year + years, day=28)
 
 
@@ -1710,10 +1677,14 @@ def _generate_tx_pool(
             else:
                 max_out = balance
                 if max_out <= 0:
-                    amt = _money_dec(0)
+                    # Never emit 0-amount outbound (private recurring): credit planned amount as inbound.
+                    tx.direction = "in"
+                    tx.payment_reference_preset = None
+                    amt = tx.planned_amount
+                    balance = balance + amt
                 else:
                     amt = min(tx.planned_amount, max_out)
-                balance = balance - amt
+                    balance = balance - amt
             tx.amount = _money_float(amt)
             tx.balance_after = _money_float(balance)
             continue
