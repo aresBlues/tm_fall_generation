@@ -87,6 +87,7 @@ class CustomerProfile:
     customer_type: str          # private | business
     ubo: list[UBO] = field(default_factory=list)
     alerts_last_12m: int = 0
+    public_figure: bool = False  # verified public figure from reference list (not necessarily PEP)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +106,7 @@ class CustomerProfile:
             "legal_address": self.legal_address.to_dict(),
             "id_document": self.id_document.to_dict(),
             "pep_flag": self.pep_flag,
+            "public_figure": self.public_figure,
             "sanctions_flag": self.sanctions_flag,
             "customer_risk_rating": self.customer_risk_rating,
             "employment_status": self.employment_status,

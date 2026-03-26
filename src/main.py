@@ -3,7 +3,7 @@ import argparse
 import json
 import os
 
-from src.generators import generate_alert
+from src.generators import generate_alert, public_figure_indices_for_batch
 
 
 OUTPUT_DIR = "output"
@@ -33,9 +33,10 @@ def main() -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     n = args.count
+    public_ix = public_figure_indices_for_batch(n)
     alerts = []
     for i in range(n):
-        alert = generate_alert(i)
+        alert = generate_alert(i, use_public_figure=(i in public_ix))
         d = alert.to_dict()
         alerts.append(d)
         if args.per_alert:

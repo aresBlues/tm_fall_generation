@@ -7,13 +7,55 @@ fall within a single 1-month alert window.  Running account balance is maintaine
 """
 from __future__ import annotations
 
+import json
 import random
+import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from faker import Faker
+
+_DEBUG_LOG_PATH = Path(__file__).resolve().parent.parent / "debug-547612.log"
+
+
+def _agent_debug_log(hypothesis_id: str, data: dict[str, Any]) -> None:
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "547612",
+            "hypothesisId": hypothesis_id,
+            "timestamp": int(time.time() * 1000),
+            "location": "generators.py:_id_expiry_plus_years",
+            "data": data,
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _df:
+            _df.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
+
+
+def _id_expiry_plus_years(issued: date, years: int = 10) -> date:
+    """ID document expiry = issued + `years`. Safe when issued is Feb 29 and target year is not a leap year."""
+    try:
+        return issued.replace(year=issued.year + years)
+    except ValueError as e:
+        # region agent log
+        _agent_debug_log(
+            "H1",
+            {
+                "issued": issued.isoformat(),
+                "target_year": issued.year + years,
+                "error": str(e),
+                "note": "Feb29_to_non_leap",
+            },
+        )
+        # endregion
+        return issued.replace(year=issued.year + years, day=28)
+
 
 from src.models import (
     AccountSummary,
@@ -32,10 +74,10 @@ from src.models import (
 # ---------------------------------------------------------------------------
 # Reproducible data
 # ---------------------------------------------------------------------------
-SEED = 42
-random.seed(SEED)
+#SEED = 42
+#random.seed(SEED)
 fake = Faker("de_DE")
-Faker.seed(SEED)
+#Faker.seed(SEED)
 
 # ---------------------------------------------------------------------------
 # Time windows
@@ -103,6 +145,64 @@ INDUSTRIES = [
     "Finance", "Technology", "Healthcare", "Retail", "Manufacturing",
     "Real Estate", "Consulting", "Legal Services", "Import/Export", "Gastronomy",
 ]
+
+# Industries plausible for a given employment (synthetic customers only; public figures keep Excel-driven industry).
+_INCOMPATIBLE_INDUSTRY_EMPLOYMENT: dict[str, frozenset[str]] = {
+    "STUDENT": frozenset({"Finance", "Legal Services", "Consulting", "Real Estate"}),
+    "UNEMPLOYED": frozenset({"Finance", "Legal Services", "Consulting"}),
+}
+
+
+def _industries_for_employment(employment: str) -> list[str]:
+    blocked = _INCOMPATIBLE_INDUSTRY_EMPLOYMENT.get(employment, frozenset())
+    pool = [i for i in INDUSTRIES if i not in blocked]
+    return pool if pool else list(INDUSTRIES)
+
+
+_STUDENT_INCOME_TURNOVER_CAP = 3000.0
+_HIGH_PAY_INDUSTRY = frozenset({"Finance", "Legal Services", "Consulting", "Real Estate", "Technology"})
+_LOW_PAY_INDUSTRY = frozenset({"Retail", "Gastronomy"})
+
+
+def _industry_income_multiplier(industry: str) -> float:
+    if industry in _HIGH_PAY_INDUSTRY:
+        return 1.28
+    if industry in _LOW_PAY_INDUSTRY:
+        return 0.78
+    return 1.0
+
+
+def _monthly_income_and_turnover(employment_status: str, industry: str) -> tuple[float, float]:
+    """Coherent expected_monthly_income and expected_monthly_turnover (EUR) from employment + industry."""
+    m = _industry_income_multiplier(industry)
+
+    if employment_status == "STUDENT":
+        inc = round(random.uniform(200.0, _STUDENT_INCOME_TURNOVER_CAP), 0)
+        inc = min(inc, _STUDENT_INCOME_TURNOVER_CAP)
+        to = round(min(_STUDENT_INCOME_TURNOVER_CAP, inc * random.uniform(0.85, 2.2)), 0)
+        return float(min(inc, _STUDENT_INCOME_TURNOVER_CAP)), float(min(to, _STUDENT_INCOME_TURNOVER_CAP))
+
+    if employment_status == "UNEMPLOYED":
+        inc = round(random.uniform(0.0, 2200.0 * m), 0)
+        to = round(min(4500.0 * m, inc * random.uniform(1.0, 2.4)), 0)
+        return float(inc), float(to)
+
+    if employment_status == "RETIRED":
+        inc = round(random.uniform(900.0 * m, 6500.0 * m), 0)
+        to = round(inc * random.uniform(0.85, 1.35), 0)
+        return float(inc), float(to)
+
+    if employment_status == "SELF_EMPLOYED":
+        inc = round(random.uniform(2000.0 * m, 32000.0 * m), 0)
+        to = round(inc * random.uniform(1.05, 3.2), 0)
+        return float(inc), float(to)
+
+    # EMPLOYED
+    inc = round(random.uniform(2400.0 * m, 20000.0 * m), 0)
+    to = round(inc * random.uniform(0.82, 2.45), 0)
+    return float(inc), float(to)
+
+
 ACCOUNT_PURPOSES = [
     "daily expenses", "salary account", "business operations",
     "savings", "investment", "international transfers",
@@ -119,6 +219,589 @@ _CUSTOMER_EMAIL_DOMAIN_WEIGHTS: tuple[tuple[str, int], ...] = (
 _CUSTOMER_EMAIL_DOMAINS = [d for d, w in _CUSTOMER_EMAIL_DOMAIN_WEIGHTS for _ in range(w)]
 
 HIGH_RISK_COUNTRIES = {"IR", "KP", "SY", "AF", "YE", "MM", "LY", "SO"}
+
+
+def _normalize_german_substring(s: str) -> str:
+    s = s.lower().strip()
+    return s.replace("ä", "a").replace("ö", "o").replace("ü", "u").replace("ß", "ss")
+
+
+def _bekannt_durch_implies_pep(text: str | None) -> bool:
+    """True if Bekannt_durch (column E) indicates a politician / comparable PEP role."""
+    if not text or not str(text).strip():
+        return False
+    t = _normalize_german_substring(str(text).strip())
+    markers = (
+        "politiker",
+        "abgeordnet",
+        "minister",
+        "bundeskanzler",
+        "kanzler",
+        "regierung",
+        "burgermeister",
+        "diplomat",
+        "europaabgeordnet",
+        "landtagsabgeordnet",
+        "bundestag",
+        "senator",
+        "mdb",
+        "mdl",
+    )
+    return any(m in t for m in markers)
+
+
+def _industry_from_bekannt_durch(text: str | None) -> str:
+    """Map Bekannt_durch (column E) to an English industry label for customer_profile.industry."""
+    if not text or not str(text).strip():
+        return "Professional Services"
+    if _bekannt_durch_implies_pep(text):
+        return "Government & Public Sector"
+    t = _normalize_german_substring(str(text).strip())
+    if any(
+        x in t
+        for x in (
+            "schauspieler",
+            "filmschauspieler",
+            "filmregisseur",
+            "filmemacher",
+            "fernsehmoderator",
+        )
+    ):
+        return "Film & Television"
+    if any(x in t for x in ("schriftsteller", "journalist")):
+        return "Publishing & Media"
+    if any(
+        x in t
+        for x in (
+            "fussball",
+            "tennis",
+            "basketball",
+            "handball",
+            "hockey",
+            "sportler",
+            "athlet",
+            "schwimmer",
+            "bob",
+            "ski",
+            "ruder",
+            "kanu",
+            "judoka",
+            "biathlet",
+            "radrenn",
+            "boxer",
+            "leichtathlet",
+            "badminton",
+            "eishockey",
+            "rollstuhl",
+            "schach",
+            "triathlet",
+            "turmspringer",
+            "gerateturner",
+            "bahnrad",
+        )
+    ) or ("spieler" in t and "schauspieler" not in t and "filmschauspieler" not in t):
+        return "Sports & Recreation"
+    if any(x in t for x in ("sanger", "musiker", "rapper", "schlager", "discjockey", "arrangeur")):
+        return "Music & Entertainment"
+    if "model" in t:
+        return "Fashion & Retail"
+    if "youtuber" in t:
+        return "Digital Media"
+    if any(x in t for x in ("fotograf", "bildhauer", "druckgrafiker")):
+        return "Arts & Creative Industries"
+    if any(x in t for x in ("dozent", "hochschullehrer")):
+        return "Education & Research"
+    if "berufssoldat" in t:
+        return "Defense & Security"
+    return "Media & Entertainment"
+
+
+# Source: input/verified_public_figures_extended.xlsx (Name, Geburtsdatum, oeffentlicher Wohnort, Bekannt_durch / Spalte E, industry)
+VERIFIED_PUBLIC_FIGURES: list[tuple[str, str, str, str | None, str | None, str | None, str]] = [
+    ('Sandra', 'Bullock', 'Sandra Bullock', '1964-07-26', 'Austin', 'Schauspieler', 'Film & Television'),
+    ('Herta', 'Müller', 'Herta Müller', '1953-08-17', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Kirsten', 'Dunst', 'Kirsten Dunst', '1982-04-30', 'Los Angeles', 'Schauspieler', 'Film & Television'),
+    ('Manuel', 'Neuer', 'Manuel Neuer', '1986-03-27', 'Gelsenkirchen', 'Fußballspieler', 'Sports & Recreation'),
+    ('Steffi', 'Graf', 'Steffi Graf', '1969-06-14', 'Las Vegas Valley', 'Tennisspieler', 'Sports & Recreation'),
+    ('Christoph', 'Waltz', 'Christoph Waltz', '1956-10-04', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Boris', 'Becker', 'Boris Becker', '1967-11-22', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Heidi', 'Klum', 'Heidi Klum', '1973-06-01', 'Bel Air', 'Model', 'Fashion & Retail'),
+    ('Werner', 'Herzog', 'Werner Herzog', '1942-09-05', 'Los Angeles', 'Filmregisseur', 'Film & Television'),
+    ('Angelique', 'Kerber', 'Angelique Kerber', '1988-01-18', 'Kiel', 'Tennisspieler', 'Sports & Recreation'),
+    ('Roland', 'Emmerich', 'Roland Emmerich', '1955-11-10', 'London', 'Schriftsteller', 'Publishing & Media'),
+    ('Dirk', 'Nowitzki', 'Dirk Nowitzki', '1978-06-19', 'Dallas', 'Basketballspieler', 'Sports & Recreation'),
+    ('Daniel', 'Brühl', 'Daniel Brühl', '1978-06-16', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Pierre', 'Littbarski', 'Pierre Littbarski', '1960-04-16', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Claudio', 'Pizarro', 'Claudio Pizarro', '1978-10-03', 'Callao', 'Fußballspieler', 'Sports & Recreation'),
+    ('Lewon', 'Aronjan', 'Lewon Aronjan', '1982-10-06', 'Jerewan', 'Schachspieler', 'Sports & Recreation'),
+    ('Dieter', 'Bohlen', 'Dieter Bohlen', '1954-02-07', 'Tötensen', 'Sänger', 'Music & Entertainment'),
+    ('Til', 'Schweiger', 'Til Schweiger', '1963-12-19', 'Palma', 'Schauspieler', 'Film & Television'),
+    ('Hanna', 'Schygulla', 'Hanna Schygulla', '1943-12-25', 'Chorzów', 'Sänger', 'Music & Entertainment'),
+    ('Helene', 'Fischer', 'Helene Fischer', '1983-08-05', 'Inning am Ammersee', 'Schlagersänger', 'Music & Entertainment'),
+    ('Jawed', 'Karim', 'Jawed Karim', '1979-10-28', 'Palo Alto', 'YouTuber', 'Digital Media'),
+    ('Nena', '', 'Nena', '1960-03-24', 'Breckerfeld', 'Sänger', 'Music & Entertainment'),
+    ('Sabine', 'Lisicki', 'Sabine Lisicki', '1989-09-22', 'Bradenton', 'Tennisspieler', 'Sports & Recreation'),
+    ('Sibel', 'Kekilli', 'Sibel Kekilli', '1980-06-16', 'Hamburg', 'Schauspieler', 'Film & Television'),
+    ('Alexander', 'Zverev', 'Alexander Zverev', '1997-04-20', 'Monte-Carlo', 'Tennisspieler', 'Sports & Recreation'),
+    ('Magdalena', 'Neuner', 'Magdalena Neuner', '1987-02-09', 'Wallgau', 'Biathlet', 'Sports & Recreation'),
+    ('Stefan', 'Raab', 'Stefan Raab', '1966-10-20', 'Hahnwald', 'Musiker', 'Music & Entertainment'),
+    ('Wolfgang', 'Overath', 'Wolfgang Overath', '1943-09-29', 'Seligenthal', 'Fußballspieler', 'Sports & Recreation'),
+    ('Thomas', 'Anders', 'Thomas Anders', '1963-03-01', 'Koblenz', 'Sänger', 'Music & Entertainment'),
+    ('Peter', 'Sloterdijk', 'Peter Sloterdijk', '1947-06-26', 'Karlsruhe', 'Schriftsteller', 'Publishing & Media'),
+    ('Tommy', 'Haas', 'Tommy Haas', '1978-04-03', 'Bradenton', 'Tennisspieler', 'Sports & Recreation'),
+    ('You', 'Xie', 'You Xie', '1958-10-01', 'Bamberg', 'Journalist', 'Publishing & Media'),
+    ('Alexandra', 'Maria Lara', 'Alexandra Maria Lara', '1978-11-12', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Jürgen', 'Prochnow', 'Jürgen Prochnow', '1941-06-10', 'Los Angeles', 'Musiker', 'Music & Entertainment'),
+    ('Andrea', 'Petković', 'Andrea Petković', '1987-09-09', 'Darmstadt', 'Tennisspieler', 'Sports & Recreation'),
+    ('Michael', 'Stich', 'Michael Stich', '1968-10-18', 'Hamburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Bill', 'Kaulitz', 'Bill Kaulitz', '1989-09-01', 'Los Angeles', 'Sänger', 'Music & Entertainment'),
+    ('Julia', 'Görges', 'Julia Görges', '1988-11-02', 'Bad Oldesloe', 'Tennisspieler', 'Sports & Recreation'),
+    ('Wolf', 'Biermann', 'Wolf Biermann', '1936-11-15', 'Hamburg', 'Schriftsteller', 'Publishing & Media'),
+    ('Annika', 'Beck', 'Annika Beck', '1994-02-16', 'Bonn', 'Tennisspieler', 'Sports & Recreation'),
+    ('Maximilian', 'Mittelstädt', 'Maximilian Mittelstädt', '1997-03-18', 'Stuttgart', 'Fußballspieler', 'Sports & Recreation'),
+    ('Kim', 'Petras', 'Kim Petras', '1992-08-27', 'Los Angeles', 'Sänger', 'Music & Entertainment'),
+    ('Marcel', 'Kittel', 'Marcel Kittel', '1988-05-11', 'Twente', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Moritz', 'Bleibtreu', 'Moritz Bleibtreu', '1971-08-13', 'Hamburg', 'Filmschauspieler', 'Film & Television'),
+    ('Nicolas', 'Kiefer', 'Nicolas Kiefer', '1977-07-05', 'Lehrte', 'Tennisspieler', 'Sports & Recreation'),
+    ('Natalie', 'Horler', 'Natalie Horler', '1981-09-23', 'Bonn', 'Model', 'Fashion & Retail'),
+    ('Zazie', 'Beetz', 'Zazie Beetz', '1991-06-01', 'Harlem', 'Schauspieler', 'Film & Television'),
+    ('Mona', 'Barthel', 'Mona Barthel', '1990-07-11', 'Neumünster', 'Tennisspieler', 'Sports & Recreation'),
+    ('Uwe', 'Boll', 'Uwe Boll', '1965-06-22', 'Vancouver', 'Filmregisseur', 'Film & Television'),
+    ('Betty', 'Heidler', 'Betty Heidler', '1983-10-14', 'Frankfurt am Main', 'Leichtathlet', 'Sports & Recreation'),
+    ('Christiane', 'Felscherinow', 'Christiane Felscherinow', '1962-05-20', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Selma', 'Ergeç', 'Selma Ergeç', '1978-11-01', 'Istanbul', 'Model', 'Fashion & Retail'),
+    ('Anke', 'Huber', 'Anke Huber', '1974-12-04', 'Ludwigshafen am Rhein', 'Tennisspieler', 'Sports & Recreation'),
+    ('David', 'Kross', 'David Kross', '1990-07-04', 'Berlin-Mitte', 'Filmschauspieler', 'Film & Television'),
+    ('Władysław', 'Kozakiewicz', 'Władysław Kozakiewicz', '1953-12-08', 'Bissendorf', 'Leichtathlet', 'Sports & Recreation'),
+    ('Anna-Lena', 'Grönefeld', 'Anna-Lena Grönefeld', '1985-06-04', 'Saarbrücken', 'Tennisspieler', 'Sports & Recreation'),
+    ('Florence', 'Kasumba', 'Florence Kasumba', '1976-10-26', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Florian', 'Mayer', 'Florian Mayer', '1983-10-05', 'Bayreuth', 'Tennisspieler', 'Sports & Recreation'),
+    ('Martina', 'Gedeck', 'Martina Gedeck', '1961-09-14', 'Berlin', 'Musiker', 'Music & Entertainment'),
+    ('Tom', 'Kaulitz', 'Tom Kaulitz', '1989-09-01', 'Bel Air', 'Schauspieler', 'Film & Television'),
+    ('Janosch', '', 'Janosch', '1931-03-11', 'Teneriffa', 'Schriftsteller', 'Publishing & Media'),
+    ('Levin', 'Öztunali', 'Levin Öztunali', '1996-03-15', 'Hamburg', 'Fußballspieler', 'Sports & Recreation'),
+    ('Ricco', 'Groß', 'Ricco Groß', '1970-08-22', 'Ruhpolding', 'Biathlet', 'Sports & Recreation'),
+    ('Benjamin', 'Becker', 'Benjamin Becker', '1981-06-16', 'Dallas', 'Tennisspieler', 'Sports & Recreation'),
+    ('Evelyn', 'Sharma', 'Evelyn Sharma', '1989-07-12', 'Toronto', 'Model', 'Fashion & Retail'),
+    ('Nora', 'Tschirner', 'Nora Tschirner', '1981-06-12', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Elyas', 'M’Barek', 'Elyas M’Barek', '1982-05-29', 'München', 'Schauspieler', 'Film & Television'),
+    ('Udo', 'Lindenberg', 'Udo Lindenberg', '1946-05-17', 'Hotel Atlantic', 'Sänger', 'Music & Entertainment'),
+    ('Boris', 'Kodjoe', 'Boris Kodjoe', '1973-03-08', 'Los Angeles', 'Model', 'Fashion & Retail'),
+    ('Bushido', '', 'Bushido', '1978-09-28', 'Bezirk Mitte', 'Rapper', 'Music & Entertainment'),
+    ('Erik', 'Möller', 'Erik Möller', '1979-01-01', 'San Francisco Bay Area', 'Journalist', 'Publishing & Media'),
+    ('Johannes', 'Vetter', 'Johannes Vetter', '1993-03-26', 'Kenzingen', 'Leichtathlet', 'Sports & Recreation'),
+    ('Mischa', 'Zverev', 'Mischa Zverev', '1987-08-22', 'Monte-Carlo', 'Tennisspieler', 'Sports & Recreation'),
+    ('Sebastian', 'Brendel', 'Sebastian Brendel', '1988-03-12', 'Potsdam', 'Kanute', 'Sports & Recreation'),
+    ('Uschi', 'Disl', 'Uschi Disl', '1970-11-15', 'Kössen', 'Biathlet', 'Sports & Recreation'),
+    ('Xavier', 'Naidoo', 'Xavier Naidoo', '1971-10-02', 'Heidelberg', 'Rapper', 'Music & Entertainment'),
+    ('Andreas', 'Krieger', 'Andreas Krieger', '1965-07-20', 'Berlin', 'Leichtathlet', 'Sports & Recreation'),
+    ('Ayọ', '', 'Ayọ', '1980-09-14', 'New York City', 'Sänger', 'Music & Entertainment'),
+    ('H.P.', 'Baxxter', 'H.P. Baxxter', '1964-03-16', 'Duvenstedt', 'Sänger', 'Music & Entertainment'),
+    ('Jan-Lennard', 'Struff', 'Jan-Lennard Struff', '1990-04-25', 'Warstein', 'Tennisspieler', 'Sports & Recreation'),
+    ('Marian', 'Gold', 'Marian Gold', '1954-05-26', 'Münster', 'Sänger', 'Music & Entertainment'),
+    ('Martina', 'Beck', 'Martina Beck', '1979-09-21', 'Mittenwald', 'Biathlet', 'Sports & Recreation'),
+    ('Stephan', 'Schröck', 'Stephan Schröck', '1986-08-21', 'Schweinfurt', 'Fußballspieler', 'Sports & Recreation'),
+    ('Thomas', 'Gottschalk', 'Thomas Gottschalk', '1950-05-18', 'Baden-Baden', 'Fernsehmoderator', 'Film & Television'),
+    ('Andreas', 'Birnbacher', 'Andreas Birnbacher', '1981-09-11', 'Schleching', 'Biathlet', 'Sports & Recreation'),
+    ('Carina', 'Witthöft', 'Carina Witthöft', '1995-02-16', 'Hamburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Dustin', 'Brown', 'Dustin Brown', '1984-12-08', 'Montego Bay', 'Tennisspieler', 'Sports & Recreation'),
+    ('Florian', 'Wellbrock', 'Florian Wellbrock', '1997-08-19', 'Magdeburg', 'Schwimmer', 'Sports & Recreation'),
+    ('Gojko', 'Mitić', 'Gojko Mitić', '1940-06-13', 'Leskovac', 'Schauspieler', 'Film & Television'),
+    ('Gréta', 'Arn', 'Gréta Arn', '1979-04-13', 'Budapest', 'Tennisspieler', 'Sports & Recreation'),
+    ('Josefa', 'Idem', 'Josefa Idem', '1964-09-23', 'Santerno', 'Kanute', 'Sports & Recreation'),
+    ('Karin', 'Schubert', 'Karin Schubert', '1944-11-26', 'Manziana', 'Model', 'Fashion & Retail'),
+    ('Marcel', 'Nguyen', 'Marcel Nguyen', '1987-09-08', 'Stuttgart', 'Geräteturner', 'Sports & Recreation'),
+    ('Philipp', 'Petzschner', 'Philipp Petzschner', '1984-03-24', 'Pulheim', 'Tennisspieler', 'Sports & Recreation'),
+    ('André', 'Lange', 'André Lange', '1973-06-28', 'Suhl', 'Bobfahrer', 'Sports & Recreation'),
+    ('Florian', 'Munteanu', 'Florian Munteanu', '1990-10-13', 'Los Angeles', 'Schauspieler', 'Film & Television'),
+    ('Francesco', 'Friedrich', 'Francesco Friedrich', '1990-05-02', 'Pirna', 'Bobfahrer', 'Sports & Recreation'),
+    ('Jan', 'Frodeno', 'Jan Frodeno', '1981-08-18', 'Andorra', 'Triathlet', 'Sports & Recreation'),
+    ('Jonas', 'Deichmann', 'Jonas Deichmann', '1987-04-15', 'Kanton Solothurn', 'Triathlet', 'Sports & Recreation'),
+    ('Judith', 'Hermann', 'Judith Hermann', '1970-05-15', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Judith', 'Rakers', 'Judith Rakers', '1976-01-06', 'Hamburg', 'Fernsehmoderator', 'Film & Television'),
+    ('Kristina', 'Vogel', 'Kristina Vogel', '1990-11-10', 'Erfurt', 'Bahnradfahrer', 'Sports & Recreation'),
+    ('Richard', 'David Precht', 'Richard David Precht', '1964-12-08', 'Düsseldorf', 'Journalist', 'Publishing & Media'),
+    ('Evi', 'Sachenbacher-Stehle', 'Evi Sachenbacher-Stehle', '1980-11-27', 'Reit im Winkl', 'Biathlet', 'Sports & Recreation'),
+    ('Hany', 'Mukhtar', 'Hany Mukhtar', '1995-03-21', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Hazel', 'Brugger', 'Hazel Brugger', '1993-12-09', 'Köln', 'Schauspieler', 'Film & Television'),
+    ('Johannes', 'Rydzek', 'Johannes Rydzek', '1991-12-09', 'Oberstdorf', 'Skispringer', 'Sports & Recreation'),
+    ('Jordan', 'Torunarigha', 'Jordan Torunarigha', '1997-08-07', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Björn', 'Phau', 'Björn Phau', '1979-10-04', 'Darmstadt', 'Tennisspieler', 'Sports & Recreation'),
+    ('David', 'Prinosil', 'David Prinosil', '1973-03-09', 'Prag', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jannik', 'Schümann', 'Jannik Schümann', '1992-07-23', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Jessica', 'Schwarz', 'Jessica Schwarz', '1977-05-05', 'Berlin', 'Model', 'Fashion & Retail'),
+    ('Josefine', 'Preuß', 'Josefine Preuß', '1986-01-13', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Judith', 'Schalansky', 'Judith Schalansky', '1980-09-20', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Kerstin', 'Garefrekes', 'Kerstin Garefrekes', '1979-09-04', 'Steinbeck', 'Fußballspieler', 'Sports & Recreation'),
+    ('Kevin', 'Kuske', 'Kevin Kuske', '1979-01-04', 'Potsdam', 'Bobfahrer', 'Sports & Recreation'),
+    ('Lisa', 'Buckwitz', 'Lisa Buckwitz', '1994-12-02', 'Schöneiche bei Berlin', 'Bobfahrer', 'Sports & Recreation'),
+    ('Rebekka', 'Haase', 'Rebekka Haase', '1993-01-02', 'Chemnitz', 'Leichtathlet', 'Sports & Recreation'),
+    ('Shermine', 'Shahrivar', 'Shermine Shahrivar', '1982-11-20', 'New York City', 'Model', 'Fashion & Retail'),
+    ('Andrea', 'Berg', 'Andrea Berg', '1966-01-28', 'Aspach', 'Sänger', 'Music & Entertainment'),
+    ('Christoph', 'Brüx', 'Christoph Brüx', '1965-12-13', 'Hamburg', 'Arrangeur', 'Music & Entertainment'),
+    ('Julia', 'Taubitz', 'Julia Taubitz', '1996-03-01', 'Annaberg-Buchholz', 'Berufssoldat', 'Defense & Security'),
+    ('Kathrin', 'Schmidt', 'Kathrin Schmidt', '1958-03-12', 'Mahlsdorf', 'Journalist', 'Publishing & Media'),
+    ('Martina', 'Müller', 'Martina Müller', '1982-10-11', 'Sehnde', 'Tennisspieler', 'Sports & Recreation'),
+    ('Otto', 'Waalkes', 'Otto Waalkes', '1948-07-22', 'Blankenese', 'Sänger', 'Music & Entertainment'),
+    ('Robert', 'Bartko', 'Robert Bartko', '1975-12-23', 'Ludwigsfelde', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Stefan', 'Kapičić', 'Stefan Kapičić', '1978-12-01', 'Belgrad', 'Schauspieler', 'Film & Television'),
+    ('Vincent', 'Keymer', 'Vincent Keymer', '2004-11-15', 'Wien', 'Schachspieler', 'Sports & Recreation'),
+    ('Andreas', 'Beck', 'Andreas Beck', '1986-02-05', 'Ravensburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Andreas', 'Pietschmann', 'Andreas Pietschmann', '1969-03-22', 'Berlin', 'Filmschauspieler', 'Film & Television'),
+    ('Barbara', 'Rittner', 'Barbara Rittner', '1973-04-25', 'Köln', 'Tennisspieler', 'Sports & Recreation'),
+    ('Christopher', 'Kas', 'Christopher Kas', '1980-06-13', 'Trostberg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jil', 'Sander', 'Jil Sander', '1943-11-27', 'Hamburg', 'Journalist', 'Publishing & Media'),
+    ('Julia', 'Schruff', 'Julia Schruff', '1982-08-16', 'Augsburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jurij', 'Koch', 'Jurij Koch', '1936-09-15', 'Sielow', 'Journalist', 'Publishing & Media'),
+    ('Lena', 'Gercke', 'Lena Gercke', '1988-02-29', 'Cloppenburg', 'Model', 'Fashion & Retail'),
+    ('Matthias', 'Bachinger', 'Matthias Bachinger', '1987-04-02', 'Hebertshausen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Michael', 'Berrer', 'Michael Berrer', '1980-07-01', 'Stuttgart', 'Tennisspieler', 'Sports & Recreation'),
+    ('Norbert', 'Haug', 'Norbert Haug', '1952-11-24', 'Stuttgart', 'Autorennfahrer', 'Media & Entertainment'),
+    ('Peter', 'Gojowczyk', 'Peter Gojowczyk', '1989-07-15', 'Erdweg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Reinhard', 'Mey', 'Reinhard Mey', '1942-12-21', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Simon', 'Greul', 'Simon Greul', '1981-04-13', 'Stuttgart', 'Tennisspieler', 'Sports & Recreation'),
+    ('Tobias', 'Kamke', 'Tobias Kamke', '1986-05-21', 'Hamburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Arthur', 'Abele', 'Arthur Abele', '1986-07-30', 'Ulm', 'Leichtathlet', 'Sports & Recreation'),
+    ('Atiye', 'Deniz', 'Atiye Deniz', '1988-11-22', 'Istanbul', 'Sänger', 'Music & Entertainment'),
+    ('Baran', 'bo Odar', 'Baran bo Odar', '1978-04-18', 'Berlin', 'Filmregisseur', 'Film & Television'),
+    ('Carl-Uwe', 'Steeb', 'Carl-Uwe Steeb', '1967-09-01', 'Reith bei Kitzbühel', 'Tennisspieler', 'Sports & Recreation'),
+    ('Daniel', 'Brands', 'Daniel Brands', '1987-07-17', 'Deggendorf', 'Tennisspieler', 'Sports & Recreation'),
+    ('Denis', 'Gremelmayr', 'Denis Gremelmayr', '1981-08-16', 'Lampertheim', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jasmin', 'Glaesser', 'Jasmin Glaesser', '1992-07-08', 'Coquitlam', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Lukas', 'Dauser', 'Lukas Dauser', '1993-06-15', 'Berlin', 'Turner', 'Media & Entertainment'),
+    ('Michael', 'Kohlmann', 'Michael Kohlmann', '1974-01-11', 'Herdecke', 'Tennisspieler', 'Sports & Recreation'),
+    ('Natalia', 'Wörner', 'Natalia Wörner', '1967-09-07', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Oliver', 'Zeidler', 'Oliver Zeidler', '1996-07-24', 'Schwaig bei Nürnberg', 'Schwimmer', 'Sports & Recreation'),
+    ('Peter', 'Schilling', 'Peter Schilling', '1956-01-28', 'München', 'Sänger', 'Music & Entertainment'),
+    ('Ralf', 'Rothmann', 'Ralf Rothmann', '1953-05-10', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Ruby', 'O. Fee', 'Ruby O. Fee', '1996-02-07', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Stipe', 'Erceg', 'Stipe Erceg', '1974-10-30', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Wilhelm', 'Bungert', 'Wilhelm Bungert', '1939-04-01', 'Düsseldorf', 'Tennisspieler', 'Sports & Recreation'),
+    ('Alexander', 'Waske', 'Alexander Waske', '1975-03-31', 'Frankfurt am Main', 'Tennisspieler', 'Sports & Recreation'),
+    ('Cedrik-Marcel', 'Stebe', 'Cedrik-Marcel Stebe', '1990-10-09', 'Vaihingen an der Enz', 'Tennisspieler', 'Sports & Recreation'),
+    ('Charlotte', 'Link', 'Charlotte Link', '1963-10-05', 'Wiesbaden', 'Schriftsteller', 'Publishing & Media'),
+    ('Dieter', 'Hallervorden', 'Dieter Hallervorden', '1935-09-05', 'Schloss Costaérès', 'Sänger', 'Music & Entertainment'),
+    ('Helmut', 'Josef Geier', 'Helmut Josef Geier', '1962-09-06', 'München', 'Discjockey', 'Music & Entertainment'),
+    ('Jasmin', 'Wöhr', 'Jasmin Wöhr', '1980-08-21', 'Balingen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Laura', 'Nolte', 'Laura Nolte', '1998-11-23', 'Dortmund', 'Bobfahrer', 'Sports & Recreation'),
+    ('Maria', 'Simon', 'Maria Simon', '1976-02-06', 'Berlin', 'Filmschauspieler', 'Film & Television'),
+    ('Steffen', 'Blochwitz', 'Steffen Blochwitz', '1967-09-08', 'Cottbus', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Timo', 'Bernhard', 'Timo Bernhard', '1981-02-24', 'Dittweiler', 'Autorennfahrer', 'Media & Entertainment'),
+    ('Bassam', 'Tibi', 'Bassam Tibi', '1944-04-04', 'Göttingen', 'Schriftsteller', 'Publishing & Media'),
+    ('Bettina', 'Bunge', 'Bettina Bunge', '1963-06-13', 'Monte-Carlo', 'Tennisspieler', 'Sports & Recreation'),
+    ('Dinah', 'Pfizenmaier', 'Dinah Pfizenmaier', '1992-01-13', 'Kamen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Enrico', 'Kühn', 'Enrico Kühn', '1977-03-10', 'Bad Langensalza', 'Bobfahrer', 'Sports & Recreation'),
+    ('Karsten', 'Braasch', 'Karsten Braasch', '1967-07-14', 'Ratingen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Martin', 'Emmrich', 'Martin Emmrich', '1984-12-17', 'Solingen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Maximilian', 'Marterer', 'Maximilian Marterer', '1995-06-15', 'Stein', 'Tennisspieler', 'Sports & Recreation'),
+    ('Nadine', 'Horchler', 'Nadine Horchler', '1986-06-21', 'Mittenwald', 'Biathlet', 'Sports & Recreation'),
+    ('Palina', 'Rojinski', 'Palina Rojinski', '1985-04-21', 'Berlin', 'Model', 'Fashion & Retail'),
+    ('Rico', 'Freimuth', 'Rico Freimuth', '1988-03-14', 'Halle (Saale)', 'Leichtathlet', 'Sports & Recreation'),
+    ('Sandra', 'Kiriasis', 'Sandra Kiriasis', '1975-01-04', 'Winterberg', 'Bobfahrer', 'Sports & Recreation'),
+    ('Selina', 'Freitag', 'Selina Freitag', '2001-05-19', 'Breitenbrunn/Erzgebirge', 'Skispringer', 'Sports & Recreation'),
+    ('Teresa', 'Orlowski', 'Teresa Orlowski', '1953-07-29', 'Marbella', 'Filmschauspieler', 'Film & Television'),
+    ('Thomas', 'Florschütz', 'Thomas Florschütz', '1978-02-20', 'Erfurt', 'Bobfahrer', 'Sports & Recreation'),
+    ('Wolfgang', 'Hohlbein', 'Wolfgang Hohlbein', '1953-08-15', 'Neuss', 'Schriftsteller', 'Publishing & Media'),
+    ('Alexander', 'Wolf', 'Alexander Wolf', '1978-12-21', 'Herges-Hallenberg', 'Biathlet', 'Sports & Recreation'),
+    ('André', 'Willms', 'André Willms', '1972-09-18', 'Magdeburg', 'Ruderer', 'Sports & Recreation'),
+    ('Christoph', 'Stephan', 'Christoph Stephan', '1986-01-12', 'Oberhof', 'Biathlet', 'Sports & Recreation'),
+    ('Daniel', 'Altmaier', 'Daniel Altmaier', '1998-09-12', 'Kempen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Dea', 'Loher', 'Dea Loher', '1964-04-20', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Dominik', 'Graf', 'Dominik Graf', '1952-09-06', 'München', 'Schauspieler', 'Film & Television'),
+    ('Giovanna', 'Scoccimarro', 'Giovanna Scoccimarro', '1997-11-10', 'Hannover', 'Judoka', 'Sports & Recreation'),
+    ('Henryk', 'M. Broder', 'Henryk M. Broder', '1946-08-20', 'Israel', 'Journalist', 'Publishing & Media'),
+    ('Jan', 'Josef Liefers', 'Jan Josef Liefers', '1964-08-08', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Kathrin', 'Hitzer', 'Kathrin Hitzer', '1986-09-03', 'Ruhpolding', 'Biathlet', 'Sports & Recreation'),
+    ('Markus', 'Zimmermann', 'Markus Zimmermann', '1964-09-04', 'Schönau am Königssee', 'Bobfahrer', 'Sports & Recreation'),
+    ('Paula', 'Kalenberg', 'Paula Kalenberg', '1986-11-09', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('René', 'Hoppe', 'René Hoppe', '1976-12-09', 'Oberhof', 'Bobfahrer', 'Sports & Recreation'),
+    ('Sara', 'Nuru', 'Sara Nuru', '1989-08-19', 'Erding', 'Model', 'Fashion & Retail'),
+    ('Tomas', 'Behrend', 'Tomas Behrend', '1974-12-12', 'Alsdorf', 'Tennisspieler', 'Sports & Recreation'),
+    ('Verona', 'Pooth', 'Verona Pooth', '1968-04-30', 'Dubai', 'Model', 'Fashion & Retail'),
+    ('Anja', 'Silja', 'Anja Silja', '1935-04-17', 'Paris', 'Musiker', 'Music & Entertainment'),
+    ('Axel', 'Prahl', 'Axel Prahl', '1960-03-26', 'Berlin', 'Musiker', 'Music & Entertainment'),
+    ('Deborah', 'Levi', 'Deborah Levi', '1997-08-28', 'Frankfurt am Main', 'Bobfahrer', 'Sports & Recreation'),
+    ('Doris', 'Schröder-Köpf', 'Doris Schröder-Köpf', '1963-08-05', 'Hannover', 'Journalist', 'Publishing & Media'),
+    ('Florian', 'Bauer', 'Florian Bauer', '1994-02-11', 'München', 'Bobfahrer', 'Sports & Recreation'),
+    ('Hans', 'Haacke', 'Hans Haacke', '1936-08-12', 'Westbeth Artists Community', 'Druckgrafiker', 'Arts & Creative Industries'),
+    ('Lars', 'Burgsmüller', 'Lars Burgsmüller', '1975-12-06', 'Altstätten', 'Tennisspieler', 'Sports & Recreation'),
+    ('Marlene', 'Weingärtner', 'Marlene Weingärtner', '1980-01-30', 'Ulm', 'Tennisspieler', 'Sports & Recreation'),
+    ('Martin', 'Putze', 'Martin Putze', '1985-01-14', 'Bad Sulza', 'Bobfahrer', 'Sports & Recreation'),
+    ('Micaela', 'Schäfer', 'Micaela Schäfer', '1983-11-01', 'Hellersdorf', 'Sänger', 'Music & Entertainment'),
+    ('Philipp', 'Marx', 'Philipp Marx', '1982-02-03', 'Seeheim-Jugenheim', 'Tennisspieler', 'Sports & Recreation'),
+    ('Rudolf', 'Martin', 'Rudolf Martin', '1967-07-31', 'Los Angeles', 'Schauspieler', 'Film & Television'),
+    ('Suzanne', 'Bernert', 'Suzanne Bernert', '1982-09-26', 'Mumbai', 'Model', 'Fashion & Retail'),
+    ('Svenja', 'Jung', 'Svenja Jung', '1993-05-28', 'Berlin', 'Filmschauspieler', 'Film & Television'),
+    ('Benjamin', 'Sadler', 'Benjamin Sadler', '1971-02-12', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Dieter', 'Kindlmann', 'Dieter Kindlmann', '1982-06-03', 'Blaichach', 'Tennisspieler', 'Sports & Recreation'),
+    ('Elisabeth', 'Seitz', 'Elisabeth Seitz', '1993-11-04', 'Stuttgart', 'Turner', 'Media & Entertainment'),
+    ('Flula', 'Borg', 'Flula Borg', '1982-03-28', 'Los Angeles', 'Sänger', 'Music & Entertainment'),
+    ('Frank', 'Moser', 'Frank Moser', '1976-09-23', 'Baden-Baden', 'Tennisspieler', 'Sports & Recreation'),
+    ('Gero', 'Kretschmer', 'Gero Kretschmer', '1985-05-06', 'Köln', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jasmin', 'Grabowski', 'Jasmin Grabowski', '1991-11-07', 'Zweibrücken', 'Judoka', 'Sports & Recreation'),
+    ('Julian', 'Reister', 'Julian Reister', '1986-04-02', 'Reinbek', 'Tennisspieler', 'Sports & Recreation'),
+    ('Kim', 'Kalicki', 'Kim Kalicki', '1997-06-27', 'Wiesbaden', 'Bobfahrer', 'Sports & Recreation'),
+    ('Matthias', 'Blübaum', 'Matthias Blübaum', '1997-04-18', 'Bielefeld', 'Schachspieler', 'Sports & Recreation'),
+    ('Matthias', 'Sommer', 'Matthias Sommer', '1991-12-03', 'Bochum', 'Bobfahrer', 'Sports & Recreation'),
+    ('Nadiuska', '', 'Nadiuska', '1952-01-19', 'Ciempozuelos', 'Schauspieler', 'Film & Television'),
+    ('Patrik', 'Kühnen', 'Patrik Kühnen', '1966-02-11', 'Berlin', 'Tennisspieler', 'Sports & Recreation'),
+    ('Sebastian', 'Urzendowsky', 'Sebastian Urzendowsky', '1985-05-28', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Simon', 'Stadler', 'Simon Stadler', '1983-07-20', 'Heidelberg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Sophia', 'Thomalla', 'Sophia Thomalla', '1989-10-06', 'Holländisches Viertel', 'Model', 'Fashion & Retail'),
+    ('Wolfgang', 'Beltracchi', 'Wolfgang Beltracchi', '1951-02-04', 'Herdern', 'Schriftsteller', 'Publishing & Media'),
+    ('Álvaro', 'Brechner', 'Álvaro Brechner', '1976-04-09', 'Madrid', 'Filmregisseur', 'Film & Television'),
+    ('Alex', 'Satschko', 'Alex Satschko', '1980-11-12', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Alexander', 'Popp', 'Alexander Popp', '1976-11-04', 'Mannheim', 'Tennisspieler', 'Sports & Recreation'),
+    ('Daniel', 'Graf', 'Daniel Graf', '1981-09-07', 'Siegsdorf', 'Biathlet', 'Sports & Recreation'),
+    ('Elena', 'Lilik', 'Elena Lilik', '1998-09-14', 'Augsburg', 'Sportler', 'Sports & Recreation'),
+    ('Emma', 'Schweiger', 'Emma Schweiger', '2002-10-26', 'Hamburg', 'Filmschauspieler', 'Film & Television'),
+    ('Eric', 'Franke', 'Eric Franke', '1989-08-16', 'Berlin', 'Bobfahrer', 'Sports & Recreation'),
+    ('Florian', 'Graf', 'Florian Graf', '1988-07-24', 'Ruhpolding', 'Biathlet', 'Sports & Recreation'),
+    ('Herrmann', 'Zschoche', 'Herrmann Zschoche', '1934-11-25', 'Storkow (Mark)', 'Filmregisseur', 'Film & Television'),
+    ('Jenny', 'Elvers', 'Jenny Elvers', '1972-05-11', 'Marbella', 'Fernsehmoderator', 'Film & Television'),
+    ('Manfred', 'Beer', 'Manfred Beer', '1953-12-02', 'Zinnwald-Georgenfeld', 'Biathlet', 'Sports & Recreation'),
+    ('Marija', 'Petrowna Maksakowa', 'Marija Petrowna Maksakowa', '1977-07-24', 'Kiew', 'Fernsehmoderator', 'Film & Television'),
+    ('Maybrit', 'Illner', 'Maybrit Illner', '1965-01-12', 'Berlin', 'Fernsehmoderator', 'Film & Television'),
+    ('Philipp', 'Walsleben', 'Philipp Walsleben', '1987-11-19', 'Kleinmachnow', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Radost', 'Bokel', 'Radost Bokel', '1975-06-04', 'Rodgau', 'Model', 'Fashion & Retail'),
+    ('Rüdiger', 'Vogler', 'Rüdiger Vogler', '1942-05-14', 'Paris', 'Schauspieler', 'Film & Television'),
+    ('Sabine', 'Hack', 'Sabine Hack', '1969-07-12', 'Sarasota County', 'Tennisspieler', 'Sports & Recreation'),
+    ('Sophie', 'Scheder', 'Sophie Scheder', '1997-01-07', 'Chemnitz', 'Turner', 'Media & Entertainment'),
+    ('Stefan', 'Klein', 'Stefan Klein', '1965-10-05', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Tim', 'Hecker', 'Tim Hecker', '1997-01-01', 'Berlin', 'Kanute', 'Sports & Recreation'),
+    ('Wolfgang', 'Joop', 'Wolfgang Joop', '1944-11-18', 'Braunschweig', 'Schriftsteller', 'Publishing & Media'),
+    ('Alexander', 'Swerew', 'Alexander Swerew', '1960-01-22', 'Hamburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Anca', 'Barna', 'Anca Barna', '1977-05-14', 'Nürnberg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Burhan', 'Qurbani', 'Burhan Qurbani', '1980-11-15', 'Erkelenz', 'Schauspieler', 'Film & Television'),
+    ('Collien', 'Fernandes', 'Collien Fernandes', '1981-09-26', 'Hamburg', 'Fernsehmoderator', 'Film & Television'),
+    ('Damian', 'Boeselager', 'Damian Boeselager', '1988-03-08', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Daniela', 'Katzenberger', 'Daniela Katzenberger', '1986-10-01', 'Mallorca', 'Model', 'Fashion & Retail'),
+    ('Dominik', 'Meffert', 'Dominik Meffert', '1981-04-09', 'Köln', 'Tennisspieler', 'Sports & Recreation'),
+    ('Gina', 'Stiebitz', 'Gina Stiebitz', '1997-10-17', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Guy', 'Spier', 'Guy Spier', '1966-02-04', 'Richmond', 'Schriftsteller', 'Publishing & Media'),
+    ('Jasmin', 'Schwiers', 'Jasmin Schwiers', '1982-08-11', 'Lichtenbusch', 'Schauspieler', 'Film & Television'),
+    ('Jürgen', 'Elsässer', 'Jürgen Elsässer', '1957-01-20', 'Falkensee', 'Journalist', 'Publishing & Media'),
+    ('Karolin', 'Horchler', 'Karolin Horchler', '1989-05-09', 'Ruhpolding', 'Biathlet', 'Sports & Recreation'),
+    ('Michel', 'Friedman', 'Michel Friedman', '1956-02-25', 'Cannes', 'Fernsehmoderator', 'Film & Television'),
+    ('Norbert', 'Weisser', 'Norbert Weisser', '1946-07-09', 'Venice', 'Filmschauspieler', 'Film & Television'),
+    ('Stefan', 'Mücke', 'Stefan Mücke', '1981-11-22', 'Berlin', 'Autorennfahrer', 'Media & Entertainment'),
+    ('Alexander', 'Rădulescu', 'Alexander Rădulescu', '1974-12-07', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('André', 'Weis', 'André Weis', '1989-09-30', 'Boppard', 'Fußballspieler', 'Sports & Recreation'),
+    ('Anne', 'Will', 'Anne Will', '1966-03-18', 'Berlin', 'Fernsehmoderator', 'Film & Television'),
+    ('Astrid', 'M. Fünderich', 'Astrid M. Fünderich', '1963-09-27', 'Stuttgart', 'Schauspieler', 'Film & Television'),
+    ('Barbara', 'Becker', 'Barbara Becker', '1966-11-01', 'Miami', 'Schauspieler', 'Film & Television'),
+    ('Bastian', 'Knittel', 'Bastian Knittel', '1983-08-08', 'Stuttgart', 'Tennisspieler', 'Sports & Recreation'),
+    ('Bianka', 'Lamade', 'Bianka Lamade', '1982-08-30', 'Straßburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Christoph', 'M. Ohrt', 'Christoph M. Ohrt', '1960-03-30', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Dmitrij', 'Kollars', 'Dmitrij Kollars', '1999-08-13', 'Hamburg', 'Schachspieler', 'Sports & Recreation'),
+    ('Eko', 'Fresh', 'Eko Fresh', '1983-09-03', 'Mönchengladbach', 'Sänger', 'Music & Entertainment'),
+    ('Frank', 'Baltrusch', 'Frank Baltrusch', '1964-03-21', 'Magdeburg', 'Schwimmer', 'Sports & Recreation'),
+    ('Gloria', 'Friedmann', 'Gloria Friedmann', '1950-01-01', 'Aignay-le-Duc', 'Bildhauer', 'Arts & Creative Industries'),
+    ('Hendrik', 'Dreekmann', 'Hendrik Dreekmann', '1975-01-29', 'Bielefeld', 'Tennisspieler', 'Sports & Recreation'),
+    ('Jana', 'Kandarr', 'Jana Kandarr', '1976-09-21', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Kim', 'Bui', 'Kim Bui', '1989-01-20', 'Ehningen', 'Turner', 'Media & Entertainment'),
+    ('Kollegah', '', 'Kollegah', '1984-08-03', 'Düsseldorf', 'Rapper', 'Music & Entertainment'),
+    ('Lars', 'Kraume', 'Lars Kraume', '1973-02-24', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Luna', 'Schweiger', 'Luna Schweiger', '1997-01-11', 'Hamburg', 'Schauspieler', 'Film & Television'),
+    ('Markus', 'Hantschk', 'Markus Hantschk', '1977-11-19', 'Böbrach', 'Tennisspieler', 'Sports & Recreation'),
+    ('Michael', 'Fuchs', 'Michael Fuchs', '1982-04-22', 'Saarbrücken', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Michel', 'Heßmann', 'Michel Heßmann', '2001-04-06', 'Freiburg im Breisgau', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Mido', 'Hamada', 'Mido Hamada', '1971-01-01', 'London', 'Schauspieler', 'Film & Television'),
+    ('Olga', 'Konon', 'Olga Konon', '1989-11-11', 'Saarbrücken', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Oliver', 'Mark', 'Oliver Mark', '1963-02-20', 'Berlin', 'Fotograf', 'Arts & Creative Industries'),
+    ('Ottfried', 'Fischer', 'Ottfried Fischer', '1953-11-07', 'Passau', 'Schauspieler', 'Film & Television'),
+    ('Pauline', 'Schäfer-Betz', 'Pauline Schäfer-Betz', '1997-01-04', 'Chemnitz', 'Turner', 'Media & Entertainment'),
+    ('Roland', 'Kaiser', 'Roland Kaiser', '1952-05-10', 'Münster', 'Sänger', 'Music & Entertainment'),
+    ('Sarah', 'Kuttner', 'Sarah Kuttner', '1979-01-29', 'Berlin', 'Fernsehmoderator', 'Film & Television'),
+    ('Shirin', 'David', 'Shirin David', '1995-04-11', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Ulrich', 'Pinner', 'Ulrich Pinner', '1954-02-07', 'Essen', 'Tennisspieler', 'Sports & Recreation'),
+    ('Ursula', 'Buchfellner', 'Ursula Buchfellner', '1961-06-08', 'Hasenbergl', 'Model', 'Fashion & Retail'),
+    ('Vivian', 'Heisen', 'Vivian Heisen', '1993-12-27', 'Wiefelstede', 'Tennisspieler', 'Sports & Recreation'),
+    ('Adeline', 'Rudolph', 'Adeline Rudolph', '1995-02-10', 'Los Angeles', 'Schauspieler', 'Film & Television'),
+    ('Anna', 'Schudt', 'Anna Schudt', '1974-03-23', 'Düsseldorf', 'Schauspieler', 'Film & Television'),
+    ('Chris', 'Kraus', 'Chris Kraus', '1963-01-01', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Christian', 'Poser', 'Christian Poser', '1986-08-16', 'Potsdam', 'Bobfahrer', 'Sports & Recreation'),
+    ('Christian', 'Saceanu', 'Christian Saceanu', '1968-07-08', 'Neuss', 'Tennisspieler', 'Sports & Recreation'),
+    ('Daniel', 'Elsner', 'Daniel Elsner', '1979-01-04', 'Memmingerberg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Dieter', 'Nuhr', 'Dieter Nuhr', '1960-10-29', 'Ratingen', 'Fernsehmoderator', 'Film & Television'),
+    ('Dietrich', 'Brüggemann', 'Dietrich Brüggemann', '1976-02-23', 'Berlin', 'Musiker', 'Music & Entertainment'),
+    ('Eva', 'Christian', 'Eva Christian', '1937-05-27', 'München', 'Filmschauspieler', 'Film & Television'),
+    ('Florian', 'Baak', 'Florian Baak', '1999-03-18', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Jannis', 'Bäcker', 'Jannis Bäcker', '1985-01-01', 'Holzwickede', 'Bobfahrer', 'Sports & Recreation'),
+    ('Jochen', 'Horst', 'Jochen Horst', '1961-09-07', 'Spanien', 'Schauspieler', 'Film & Television'),
+    ('Juju', '', 'Juju', '1992-11-20', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Klaus-Jürgen', 'Wrede', 'Klaus-Jürgen Wrede', '1963-08-19', 'Arnsberg', 'Schriftsteller', 'Publishing & Media'),
+    ('Melanie', 'Müller', 'Melanie Müller', '1988-06-10', 'Leipzig', 'Popsänger', 'Music & Entertainment'),
+    ('Michael', 'Kumpfmüller', 'Michael Kumpfmüller', '1961-07-21', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Nico', 'Santos', 'Nico Santos', '1993-01-07', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Nina', 'George', 'Nina George', '1973-08-30', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Sanna', 'Englund', 'Sanna Englund', '1975-04-18', 'Berlin', 'Model', 'Fashion & Retail'),
+    ('Schwesta', 'Ewa', 'Schwesta Ewa', '1984-07-16', 'Frankfurt am Main', 'Sänger', 'Music & Entertainment'),
+    ('Tatjana', 'Rühl', 'Tatjana Rühl', '1965-01-18', 'Handewitt', 'Handballspieler', 'Sports & Recreation'),
+    ('Torsten', 'Voges', 'Torsten Voges', '1961-12-17', 'Los Angeles', 'Schauspieler', 'Film & Television'),
+    ('Achim', 'Reichel', 'Achim Reichel', '1944-01-28', 'Hummelsbüttel', 'Sänger', 'Music & Entertainment'),
+    ('Alina', 'Bronsky', 'Alina Bronsky', '1978-01-01', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Andrea', 'Kiewel', 'Andrea Kiewel', '1965-06-10', 'Tel Aviv-Jaffa', 'Schwimmer', 'Sports & Recreation'),
+    ('Andreas', 'Bohnenstengel', 'Andreas Bohnenstengel', '1970-06-09', 'München', 'Dozent', 'Education & Research'),
+    ('Andreas', 'Bredau', 'Andreas Bredau', '1984-03-21', 'Großkayna', 'Bobfahrer', 'Sports & Recreation'),
+    ('Andreas', 'Dorau', 'Andreas Dorau', '1964-01-19', 'Hamburg', 'Sänger', 'Music & Entertainment'),
+    ('Andreas', 'Toba', 'Andreas Toba', '1990-10-07', 'Hannover', 'Turner', 'Media & Entertainment'),
+    ('Angelika', 'Bachmann', 'Angelika Bachmann', '1979-05-16', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Angelika', 'Roesch', 'Angelika Roesch', '1977-06-08', 'Oberweier', 'Tennisspieler', 'Sports & Recreation'),
+    ('Angelina', 'Maccarone', 'Angelina Maccarone', '1965-08-21', 'Berlin', 'Filmregisseur', 'Film & Television'),
+    ('Anja', 'Schüte', 'Anja Schüte', '1964-09-02', 'Oslo', 'Filmschauspieler', 'Film & Television'),
+    ('Annika', 'Drazek', 'Annika Drazek', '1995-04-11', 'Gladbeck', 'Bobfahrer', 'Sports & Recreation'),
+    ('Arifin', 'Putra', 'Arifin Putra', '1987-05-01', 'Jakarta', 'Schauspieler', 'Film & Television'),
+    ('Birgit', 'Michels', 'Birgit Michels', '1984-09-28', 'Bonn', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Christian', 'Ulmen', 'Christian Ulmen', '1975-09-22', 'Palma', 'Fernsehmoderator', 'Film & Television'),
+    ('Christiane', 'Gohl', 'Christiane Gohl', '1958-01-01', 'Los Gallardos', 'Schriftsteller', 'Publishing & Media'),
+    ('Christin', 'Senkel', 'Christin Senkel', '1987-08-31', 'Oberhof', 'Bobfahrer', 'Sports & Recreation'),
+    ('Daniel', 'Richter', 'Daniel Richter', '1962-12-18', 'Eutin', 'Schauspieler', 'Film & Television'),
+    ('Dirk', 'Dier', 'Dirk Dier', '1972-02-16', 'Blieskastel', 'Tennisspieler', 'Sports & Recreation'),
+    ('Emma', 'Becker', 'Emma Becker', '1988-12-14', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Emma', 'Malewski', 'Emma Malewski', '2004-07-18', 'Chemnitz', 'Turner', 'Media & Entertainment'),
+    ('Frank', 'Witzel', 'Frank Witzel', '1955-01-01', 'Offenbach am Main', 'Musiker', 'Music & Entertainment'),
+    ('Gerhard', 'Polt', 'Gerhard Polt', '1942-05-07', 'München', 'Schriftsteller', 'Publishing & Media'),
+    ('Gina-Lisa', 'Lohfink', 'Gina-Lisa Lohfink', '1986-09-23', 'Hasselbach', 'Model', 'Fashion & Retail'),
+    ('Ines', 'Schwerdtner', 'Ines Schwerdtner', '1989-08-26', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Juergen', 'Teller', 'Juergen Teller', '1964-01-28', 'London', 'Fotograf', 'Arts & Creative Industries'),
+    ('Juliane', 'Banse', 'Juliane Banse', '1969-07-10', 'Dießen am Ammersee', 'Musiker', 'Music & Entertainment'),
+    ('Juliane', 'Lorenz', 'Juliane Lorenz', '1957-08-02', 'München', 'Schauspieler', 'Film & Television'),
+    ('Juliane', 'Werding', 'Juliane Werding', '1956-07-19', 'Starnberg', 'Sänger', 'Music & Entertainment'),
+    ('Julius', 'Kade', 'Julius Kade', '1999-05-20', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Karin', 'Kschwendt', 'Karin Kschwendt', '1968-09-14', 'Wien', 'Tennisspieler', 'Sports & Recreation'),
+    ('Kolja', 'Afriyie', 'Kolja Afriyie', '1982-04-06', 'Flensburg', 'Fußballspieler', 'Sports & Recreation'),
+    ('Larissa', 'Mondrus', 'Larissa Mondrus', '1943-11-15', 'München', 'Sänger', 'Music & Entertainment'),
+    ('Lilly', 'Krug', 'Lilly Krug', '2001-06-05', 'München', 'Model', 'Fashion & Retail'),
+    ('Lukas', 'Rieger', 'Lukas Rieger', '1999-06-03', 'Dubai', 'Sänger', 'Music & Entertainment'),
+    ('Mark', 'Lamsfuß', 'Mark Lamsfuß', '1994-04-19', 'Saarbrücken', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Marvin', 'Seidel', 'Marvin Seidel', '1995-11-09', 'St. Ingbert', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Matthias', 'Bertsch', 'Matthias Bertsch', '1966-11-15', 'Mödling', 'Musiker', 'Music & Entertainment'),
+    ('Minh-Khai', 'Phan-Thi', 'Minh-Khai Phan-Thi', '1974-02-19', 'Berlin', 'Fernsehmoderator', 'Film & Television'),
+    ('Nadja', 'Becker', 'Nadja Becker', '1978-10-25', 'Köln', 'Schauspieler', 'Film & Television'),
+    ('Norman', 'Ohler', 'Norman Ohler', '1970-02-04', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Patrick', 'Kohlmann', 'Patrick Kohlmann', '1983-02-25', 'Dortmund', 'Fußballspieler', 'Sports & Recreation'),
+    ('Patrycja', 'Volny', 'Patrycja Volny', '1988-02-05', 'Hongkong', 'Sänger', 'Music & Entertainment'),
+    ('Ralf', 'Isau', 'Ralf Isau', '1956-03-02', 'Asperg', 'Schriftsteller', 'Publishing & Media'),
+    ('Robert', 'Leipertz', 'Robert Leipertz', '1993-02-01', 'Jülich', 'Fußballspieler', 'Sports & Recreation'),
+    ('Sabina', 'Began', 'Sabina Began', '1974-10-22', 'Italien', 'Schauspieler', 'Film & Television'),
+    ('Stefanie', 'Horn', 'Stefanie Horn', '1991-01-09', 'Brescia', 'Kanute', 'Sports & Recreation'),
+    ('Vanessa', 'Radman', 'Vanessa Radman', '1974-01-01', 'Wuppertal', 'Schauspieler', 'Film & Television'),
+    ('Vladimir', 'Burlakov', 'Vladimir Burlakov', '1987-01-01', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Carsten', 'Arriens', 'Carsten Arriens', '1969-04-11', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Christiane', 'Pilz', 'Christiane Pilz', '1975-08-03', 'Rostock', 'Schwimmer', 'Sports & Recreation'),
+    ('Edin', 'Hasanović', 'Edin Hasanović', '1992-04-02', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Ella', 'Endlich', 'Ella Endlich', '1984-06-18', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Emil', 'Hurezeanu', 'Emil Hurezeanu', '1955-08-26', 'Wien', 'Journalist', 'Publishing & Media'),
+    ('Erwin', 'Hadewicz', 'Erwin Hadewicz', '1951-04-02', 'Ellwangen', 'Fußballspieler', 'Sports & Recreation'),
+    ('Eva', 'Wilms', 'Eva Wilms', '1952-07-28', 'Essen', 'Leichtathlet', 'Sports & Recreation'),
+    ('Fabian', 'Roth', 'Fabian Roth', '1995-11-29', 'Saarbrücken', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Fadhil', 'al-Azzawi', 'Fadhil al-Azzawi', '1940-01-01', 'Berlin', 'Journalist', 'Publishing & Media'),
+    ('Florian', 'Kohls', 'Florian Kohls', '1995-04-03', 'Berlin', 'Fußballspieler', 'Sports & Recreation'),
+    ('Frank', 'Bornemann', 'Frank Bornemann', '1945-04-27', 'Hannover', 'Sänger', 'Music & Entertainment'),
+    ('Frank', 'Elstner', 'Frank Elstner', '1942-04-19', 'Baden-Baden', 'Fernsehmoderator', 'Film & Television'),
+    ('Howard', 'Carpendale', 'Howard Carpendale', '1946-01-14', 'München', 'Sänger', 'Music & Entertainment'),
+    ('Isabel', 'Lohau', 'Isabel Lohau', '1992-03-17', 'Mülheim an der Ruhr', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Isolde', 'Barth', 'Isolde Barth', '1948-08-24', 'München', 'Filmschauspieler', 'Film & Television'),
+    ('Jana', 'Beller', 'Jana Beller', '1990-10-27', 'Lippramsdorf', 'Model', 'Fashion & Retail'),
+    ('John', 'Tripp', 'John Tripp', '1977-05-04', 'Kingston', 'Eishockeyspieler', 'Sports & Recreation'),
+    ('Julia', 'Neigel', 'Julia Neigel', '1966-04-19', 'Ludwigshafen am Rhein', 'Sänger', 'Music & Entertainment'),
+    ('Katja', 'Krasavice', 'Katja Krasavice', '1996-08-10', 'Leipzig', 'Sänger', 'Music & Entertainment'),
+    ('Kimberly', 'Ann Voltemas', 'Kimberly Ann Voltemas', '1992-01-22', 'Bangkok', 'Model', 'Fashion & Retail'),
+    ('Klaus', 'Eberhard', 'Klaus Eberhard', '1957-09-15', 'Berlin', 'Tennisspieler', 'Sports & Recreation'),
+    ('Konrad', 'Adam', 'Konrad Adam', '1942-03-01', 'Oberursel (Taunus)', 'Journalist', 'Publishing & Media'),
+    ('Lars', 'Koslowski', 'Lars Koslowski', '1971-05-22', 'Vellmar', 'Tennisspieler', 'Sports & Recreation'),
+    ('Marco', 'Girnth', 'Marco Girnth', '1970-02-10', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Michael', 'Wendler', 'Michael Wendler', '1972-06-22', 'Cape Coral', 'Sänger', 'Music & Entertainment'),
+    ('Nicki', '', 'Nicki', '1966-11-02', 'Plattling', 'Sänger', 'Music & Entertainment'),
+    ('Nicolaus', 'Fest', 'Nicolaus Fest', '1962-07-01', 'Kroatien', 'Journalist', 'Publishing & Media'),
+    ('Oliver', 'Gross', 'Oliver Gross', '1973-06-17', 'München', 'Tennisspieler', 'Sports & Recreation'),
+    ('Petra', 'Haltmayr', 'Petra Haltmayr', '1975-09-16', 'Rettenberg', 'Skirennläufer', 'Sports & Recreation'),
+    ('Rafed', 'El-Masri', 'Rafed El-Masri', '1982-08-10', 'Berlin', 'Schwimmer', 'Sports & Recreation'),
+    ('Rainer', 'Rupp', 'Rainer Rupp', '1945-09-21', 'Justizvollzugsanstalt Saarbrücken', 'Schriftsteller', 'Publishing & Media'),
+    ('Rezo', '', 'Rezo', '1992-08-14', 'Aachen', 'Musiker', 'Music & Entertainment'),
+    ('Rosa', 'Klöser', 'Rosa Klöser', '1996-06-24', 'Kopenhagen', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Rüdiger', 'Dorn', 'Rüdiger Dorn', '1969-01-01', 'Pfofeld', 'Schriftsteller', 'Publishing & Media'),
+    ('Sabine', 'Ellerbrock', 'Sabine Ellerbrock', '1975-11-01', 'Bielefeld', 'Rollstuhltennisspieler', 'Sports & Recreation'),
+    ('Sarah', 'Voss', 'Sarah Voss', '1999-10-21', 'Dormagen', 'Turner', 'Media & Entertainment'),
+    ('Stephanie', 'Stumph', 'Stephanie Stumph', '1984-07-07', 'Dresden', 'Filmschauspieler', 'Film & Television'),
+    ('Ulla', 'von Brandenburg', 'Ulla von Brandenburg', '1974-01-01', "Nogent-l'Artaud", 'Fotograf', 'Arts & Creative Industries'),
+    ('Ulrich', 'Wickert', 'Ulrich Wickert', '1942-12-02', 'Heidelberg', 'Fernsehmoderator', 'Film & Television'),
+    ('Uwe', 'Ommer', 'Uwe Ommer', '1943-01-01', 'Paris', 'Fotograf', 'Arts & Creative Industries'),
+    ('Verena', 'von Strenge', 'Verena von Strenge', '1975-07-27', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Yvonne', 'Li', 'Yvonne Li', '1998-05-30', 'Mülheim an der Ruhr', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Ada', 'Mee', 'Ada Mee', '1946-01-01', 'Heidelberg', 'Fotograf', 'Arts & Creative Industries'),
+    ('Andreas', 'Giebel', 'Andreas Giebel', '1958-06-04', 'München', 'Schauspieler', 'Film & Television'),
+    ('Anne', 'Haigis', 'Anne Haigis', '1955-12-09', 'Bonn', 'Sänger', 'Music & Entertainment'),
+    ('Carla', 'Nelte', 'Carla Nelte', '1990-09-21', 'Oberhausen', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Christoph', 'John', 'Christoph John', '1958-12-24', 'Heidenheim an der Brenz', 'Fußballspieler', 'Sports & Recreation'),
+    ('Daniel', 'Donskoy', 'Daniel Donskoy', '1990-01-27', 'London', 'Sänger', 'Music & Entertainment'),
+    ('Daniel', 'Lopes', 'Daniel Lopes', '1976-11-12', 'Schloß Holte', 'Sänger', 'Music & Entertainment'),
+    ('Dieter', 'Appelt', 'Dieter Appelt', '1935-03-03', 'Berlin', 'Bildhauer', 'Arts & Creative Industries'),
+    ('Edward', 'Lee Spence', 'Edward Lee Spence', '1947-11-06', 'Summerville', 'Journalist', 'Publishing & Media'),
+    ('Fiona', 'Erdmann', 'Fiona Erdmann', '1988-09-09', 'Dubai', 'Model', 'Fashion & Retail'),
+    ('Günter', 'Sommer', 'Günter Sommer', '1943-08-25', 'Radebeul', 'Hochschullehrer', 'Education & Research'),
+    ('Helen', 'Kevric', 'Helen Kevric', '2008-03-21', 'Ostfildern', 'Turner', 'Media & Entertainment'),
+    ('Helga', 'Schneider', 'Helga Schneider', '1937-11-17', 'Bologna', 'Schriftsteller', 'Publishing & Media'),
+    ('Henning', 'Lohner', 'Henning Lohner', '1961-07-17', 'Los Angeles', 'Filmregisseur', 'Film & Television'),
+    ('Hildegard', 'Westerkamp', 'Hildegard Westerkamp', '1946-04-08', 'Vancouver', 'Schriftsteller', 'Publishing & Media'),
+    ('Jan', 'Weiler', 'Jan Weiler', '1967-10-28', 'Icking', 'Journalist', 'Publishing & Media'),
+    ('Jana', 'Schmidt', 'Jana Schmidt', '1972-12-13', 'Rostock', 'Leichtathlet', 'Sports & Recreation'),
+    ('Jens', 'Winter', 'Jens Winter', '1965-05-26', 'Berlin', 'Filmschauspieler', 'Film & Television'),
+    ('Jochen', 'Schropp', 'Jochen Schropp', '1978-11-22', 'Langgöns', 'Fernsehmoderator', 'Film & Television'),
+    ('Josephine', 'Meckseper', 'Josephine Meckseper', '1964-01-01', 'New York City', 'Filmemacher', 'Film & Television'),
+    ('Julian', 'Engels', 'Julian Engels', '1993-04-22', 'Dülmen', 'Fußballspieler', 'Sports & Recreation'),
+    ('Kai', 'Schäfer', 'Kai Schäfer', '1993-06-13', 'Mülheim an der Ruhr', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Katja', 'Abel', 'Katja Abel', '1983-04-08', 'Berlin', 'Geräteturner', 'Sports & Recreation'),
+    ('Kira', 'Lipperheide', 'Kira Lipperheide', '2000-02-07', 'Castrop-Rauxel', 'Bobfahrer', 'Sports & Recreation'),
+    ('Kolja', 'Pusch', 'Kolja Pusch', '1993-02-12', 'Wuppertal', 'Fußballspieler', 'Sports & Recreation'),
+    ('Lars', 'Rehmann', 'Lars Rehmann', '1975-05-21', 'Salzburg', 'Tennisspieler', 'Sports & Recreation'),
+    ('Leonie', 'Fiebig', 'Leonie Fiebig', '1990-05-24', 'Köln', 'Bobfahrer', 'Sports & Recreation'),
+    ('Lilli', 'Schweiger', 'Lilli Schweiger', '1998-07-17', 'Hamburg', 'Schauspieler', 'Film & Television'),
+    ('Lisa', 'Fitz', 'Lisa Fitz', '1951-09-15', 'Rottal (Bayern)', 'Schauspieler', 'Film & Television'),
+    ('Lisa', 'Maria Potthoff', 'Lisa Maria Potthoff', '1978-07-25', 'Berlin', 'Schauspieler', 'Film & Television'),
+    ('Lovelyn', 'Enebechi', 'Lovelyn Enebechi', '1996-10-21', 'Alsterdorf', 'Model', 'Fashion & Retail'),
+    ('Margarete', 'Stokowski', 'Margarete Stokowski', '1986-04-14', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Martin', 'Hyun', 'Martin Hyun', '1979-05-04', 'Brüssel', 'Schriftsteller', 'Publishing & Media'),
+    ('Matthias', 'Becker', 'Matthias Becker', '1974-04-19', 'Frankfurt am Main', 'Fußballspieler', 'Sports & Recreation'),
+    ('Michael', 'Seidenbecher', 'Michael Seidenbecher', '1984-11-06', 'Erfurt', 'Radrennfahrer', 'Sports & Recreation'),
+    ('Nils', 'Langer', 'Nils Langer', '1990-01-25', 'Affalterbach', 'Tennisspieler', 'Sports & Recreation'),
+    ('Nina', 'Chuba', 'Nina Chuba', '1998-10-14', 'Berlin', 'Sänger', 'Music & Entertainment'),
+    ('Sandra', 'Marinello', 'Sandra Marinello', '1983-05-29', 'Düsseldorf', 'Badmintonspieler', 'Sports & Recreation'),
+    ('Sascha', 'Lobo', 'Sascha Lobo', '1975-05-11', 'Prenzlauer Berg', 'Journalist', 'Publishing & Media'),
+    ('Tina', 'Ruland', 'Tina Ruland', '1966-10-09', 'Berlin', 'Schriftsteller', 'Publishing & Media'),
+    ('Andreas', 'Wessels', 'Andreas Wessels', '1964-07-06', 'Uedem', 'Fußballspieler', 'Sports & Recreation'),
+    ('Felix', 'Petermann', 'Felix Petermann', '1984-04-11', 'Füssen', 'Eishockeyspieler', 'Sports & Recreation'),
+    ('Holger', 'C. Gotha', 'Holger C. Gotha', '1960-12-07', 'München', 'Schauspieler', 'Film & Television'),
+    ('Jens-Peter', 'Berndt', 'Jens-Peter Berndt', '1963-08-17', 'Potsdam', 'Schwimmer', 'Sports & Recreation'),
+    ('Jürgen', 'Theobaldy', 'Jürgen Theobaldy', '1944-03-07', 'Schweiz', 'Schriftsteller', 'Publishing & Media'),
+    ('Karsten', 'Thormaehlen', 'Karsten Thormaehlen', '1965-07-28', 'Wiesbaden', 'Fotograf', 'Arts & Creative Industries'),
+    ('Marco', 'Grimm', 'Marco Grimm', '1972-06-16', 'Baden-Baden', 'Fußballspieler', 'Sports & Recreation'),
+    ('Michael', 'Kühntopf', 'Michael Kühntopf', '1957-08-11', 'Seeland', 'Schriftsteller', 'Publishing & Media'),
+    ('Peter', 'Klocke', 'Peter Klocke', '1957-12-20', 'Rellinghausen', 'Schauspieler', 'Film & Television'),
+    ('Petra', 'Reski', 'Petra Reski', '1958-01-01', 'Venedig', 'Journalist', 'Publishing & Media'),
+    ('Sebastian', 'Enderle', 'Sebastian Enderle', '1989-05-29', 'Ulm', 'Fußballspieler', 'Sports & Recreation'),
+    ('Simon', 'Pierro', 'Simon Pierro', '1978-10-02', 'Berlin', 'Fernsehmoderator', 'Film & Television'),
+    ('Stefan', 'Mross', 'Stefan Mross', '1975-11-26', 'Unterwössen', 'Sänger', 'Music & Entertainment'),
+    ('Tilman', 'Spengler', 'Tilman Spengler', '1947-03-02', 'Ambach', 'Journalist', 'Publishing & Media'),
+    ('Tyron', 'Montgomery', 'Tyron Montgomery', '1967-04-09', 'München', 'Filmregisseur', 'Film & Television'),
+    ('Wolfgang', 'Krewe', 'Wolfgang Krewe', '1966-10-20', 'Berlin', 'Schauspieler', 'Film & Television'),
+]
+
+def public_figure_indices_for_batch(total: int) -> set[int]:
+    """Alert indices [0, total) that use a verified public figure (~10% of total, rounded).
+
+    Uses a dedicated RNG stream so the choice does not consume the global `random` sequence
+    used inside `generate_alert` (reproducibility).
+    """
+    if total <= 0:
+        return set()
+    num = max(0, min(total, int(total * 0.1 + 0.5)))
+    if num == 0:
+        return set()
+    rng = random.Random(total)
+    return set(rng.sample(range(total), num))
+
 
 _MONEY_QUANT = Decimal("1")
 
@@ -432,35 +1115,62 @@ def _generate_address() -> Address:
 # Customer profile
 # ---------------------------------------------------------------------------
 
-def generate_customer_profile(customer_id: str) -> CustomerProfile:
-    first = fake.first_name()
-    last = fake.last_name()
-    dob = fake.date_of_birth(minimum_age=25, maximum_age=75)
-    customer_type = random.choices(["private", "business"], weights=[70, 30])[0]
-
-    legal = _generate_address()
-
-    issued = fake.date_between(start_date="-10y", end_date="-1y")
-    expires = issued.replace(year=issued.year + 10)
-
-    ubo: list[UBO] = []
-    if customer_type == "business":
-        num_ubo = random.randint(1, 3)
-        remaining = 100.0
-        for j in range(num_ubo):
-            pct = round(random.uniform(10, remaining - 10 * (num_ubo - j - 1)), 0) if j < num_ubo - 1 else round(remaining, 0)
-            remaining -= pct
-            ubo.append(UBO(name=fake.name(), ownership_percentage=pct))
-
-    monthly_income = round(random.uniform(2000, 15000), 0)
+def generate_customer_profile(
+    customer_id: str,
+    *,
+    verified_figure_row: tuple[str, str, str, str | None, str | None, str | None, str] | None = None,
+) -> CustomerProfile:
+    if verified_figure_row is not None:
+        first, last, full, dob_s, city_hint, bekannt_durch, industry = verified_figure_row
+        full_name = full
+        if dob_s:
+            dob = datetime.fromisoformat(dob_s).date()
+        else:
+            dob = fake.date_of_birth(minimum_age=25, maximum_age=75)
+        place_of_birth = city_hint if city_hint else fake.city()
+        customer_type = "private"
+        legal = _generate_address()
+        issued = fake.date_between(start_date="-10y", end_date="-1y")
+        expires = _id_expiry_plus_years(issued)
+        pep_flag = _bekannt_durch_implies_pep(bekannt_durch)
+        is_public_figure = True
+        ubo: list[UBO] = []
+        profile_industry = industry
+        emp_status = random.choice(EMPLOYMENT_STATUSES)
+        risk_rating = random.choice(RISK_RATINGS)
+        monthly_income, monthly_turnover = _monthly_income_and_turnover(emp_status, profile_industry)
+    else:
+        first = fake.first_name()
+        last = fake.last_name()
+        full_name = f"{first} {last}"
+        dob = fake.date_of_birth(minimum_age=25, maximum_age=75)
+        place_of_birth = fake.city()
+        customer_type = random.choices(["private", "business"], weights=[70, 30])[0]
+        legal = _generate_address()
+        issued = fake.date_between(start_date="-10y", end_date="-1y")
+        expires = _id_expiry_plus_years(issued)
+        ubo = []
+        if customer_type == "business":
+            num_ubo = random.randint(1, 3)
+            remaining = 100.0
+            for j in range(num_ubo):
+                pct = round(random.uniform(10, remaining - 10 * (num_ubo - j - 1)), 0) if j < num_ubo - 1 else round(remaining, 0)
+                remaining -= pct
+                ubo.append(UBO(name=fake.name(), ownership_percentage=pct))
+        pep_flag = random.random() < 0.05
+        is_public_figure = False
+        emp_status = random.choice(EMPLOYMENT_STATUSES)
+        profile_industry = random.choice(_industries_for_employment(emp_status))
+        risk_rating = random.choice(RISK_RATINGS)
+        monthly_income, monthly_turnover = _monthly_income_and_turnover(emp_status, profile_industry)
 
     return CustomerProfile(
         customer_id=customer_id,
         first_name=first,
         last_name=last,
-        full_name=f"{first} {last}",
+        full_name=full_name,
         date_of_birth=dob.isoformat(),
-        place_of_birth=fake.city(),
+        place_of_birth=place_of_birth,
         nationality=random.choice(["DE", "DE", "DE", "AT", "CH", "FR", "TR", "PL"]),
         residency_country="DE",
         kyc_status=random.choices(KYC_STATUSES, weights=[85, 10, 5])[0],
@@ -474,17 +1184,18 @@ def generate_customer_profile(customer_id: str) -> CustomerProfile:
             issued_at=issued.isoformat(),
             expires_at=expires.isoformat(),
         ),
-        pep_flag=random.random() < 0.05,
+        pep_flag=pep_flag,
         sanctions_flag=False,
-        customer_risk_rating=random.choice(RISK_RATINGS),
-        employment_status=random.choice(EMPLOYMENT_STATUSES),
-        industry=random.choice(INDUSTRIES),
+        customer_risk_rating=risk_rating,
+        employment_status=emp_status,
+        industry=profile_industry,
         account_purpose=random.choice(ACCOUNT_PURPOSES),
         expected_monthly_income=monthly_income,
-        expected_monthly_turnover=round(monthly_income * random.uniform(0.8, 2.5), 0),
+        expected_monthly_turnover=monthly_turnover,
         customer_type=customer_type,
         ubo=ubo,
         alerts_last_12m=random.randint(0, 3),
+        public_figure=is_public_figure,
     )
 
 
@@ -530,6 +1241,7 @@ class _InternalTx:
         "cp_name", "cp_iban", "cp_bic", "cp_bank", "cp_country",
         "cash_tx_type", "atm_city", "atm_country",
         "balance_after", "is_trigger",
+        "planned_amount", "payment_reference_preset",
     )
 
     def __init__(self) -> None:
@@ -553,6 +1265,8 @@ class _InternalTx:
         self.atm_country: str | None = None
         self.balance_after: float = 0.0
         self.is_trigger: bool = False
+        self.planned_amount: Decimal | None = None
+        self.payment_reference_preset: str | None = None
 
 
 def _random_dt_between(start: datetime, end: datetime) -> datetime:
@@ -578,6 +1292,75 @@ def _truncated_gauss(
         if lo <= x <= hi:
             return _money_dec(x)
     return _money_dec(random.uniform(lo, hi))
+
+
+def _opening_balance_params(
+    employment_status: str,
+    customer_risk_rating: str,
+    industry: str,
+    *,
+    secondary: bool,
+) -> tuple[float, float, float, float]:
+    """Return (lo, hi, mu, sigma) for truncated Gaussian opening balance."""
+    if secondary:
+        lo, hi = 500.0, 50000.0
+        if employment_status == "STUDENT":
+            mu = 3500.0
+        elif employment_status == "UNEMPLOYED":
+            mu = 5000.0
+        elif employment_status == "RETIRED":
+            mu = 15000.0
+        elif employment_status == "SELF_EMPLOYED":
+            mu = 22000.0
+        else:
+            mu = 18000.0
+    else:
+        lo, hi = 5000.0, 150000.0
+        if employment_status == "STUDENT":
+            mu = 12000.0
+            lo, hi = 500.0, 35000.0
+        elif employment_status == "UNEMPLOYED":
+            mu = 18000.0
+            lo, hi = 1000.0, 60000.0
+        elif employment_status == "RETIRED":
+            mu = 55000.0
+        elif employment_status == "SELF_EMPLOYED":
+            mu = 90000.0
+            hi = 180000.0
+        else:
+            mu = 77500.0
+
+    high_industry = {"Finance", "Legal Services", "Consulting", "Real Estate"}
+    low_industry = {"Retail", "Gastronomy"}
+    if industry in high_industry:
+        mu *= 1.2
+        if not secondary:
+            hi = min(hi * 1.05, 200000.0)
+    elif industry in low_industry:
+        mu *= 0.88
+        lo = max(500.0, lo * 0.95)
+
+    if customer_risk_rating == "high":
+        mu *= 1.12
+    elif customer_risk_rating == "medium":
+        mu *= 1.04
+
+    mu = max(lo, min(mu, hi))
+    sigma = max((hi - lo) / 6.0, 1e-6)
+    return lo, hi, mu, sigma
+
+
+def _opening_balance_for_profile(
+    employment_status: str,
+    customer_risk_rating: str,
+    industry: str,
+    *,
+    secondary: bool,
+) -> float:
+    lo, hi, mu, sigma = _opening_balance_params(
+        employment_status, customer_risk_rating, industry, secondary=secondary
+    )
+    return _money_float(_truncated_gauss(lo, hi, mu=mu, sigma=sigma))
 
 
 def _iban_country(iban: str) -> str:
@@ -630,6 +1413,172 @@ def _fill_counterparty_non_cash(tx: _InternalTx) -> None:
     tx.cp_bank = bank
 
 
+class _PrivateMonthlyBudget(NamedTuple):
+    """Recurring private outflows vs one monthly salary (whole EUR)."""
+    gehalt: Decimal
+    miete: Decimal
+    telefon: Decimal
+    auto_rate: Decimal
+    fitness: Decimal
+
+
+def _private_recurring_amounts(gehalt: int) -> _PrivateMonthlyBudget:
+    """Miete at most 30% of Gehalt; other bills from remainder with slack; sum(out) < gehalt."""
+    G = max(int(gehalt), 1500)
+    Gd = _money_dec(G)
+    m_cap = Gd * Decimal("0.30")
+    miete = _money_dec(random.uniform(G * 0.18, G * 0.30))
+    if miete > m_cap:
+        miete = _money_dec(m_cap)
+    slack = _money_dec(G * random.uniform(0.08, 0.15))
+    pool = Gd - miete - slack
+    min_pool = _money_dec(15) + _money_dec(100) + _money_dec(25)
+    if pool < min_pool:
+        slack = max(_money_dec(1), Gd - miete - min_pool)
+        pool = Gd - miete - slack
+    if pool < min_pool:
+        miete = min(m_cap, max(_money_dec(400), Gd - slack - min_pool))
+        pool = Gd - miete - slack
+
+    w1, w2, w3 = random.random(), random.random(), random.random()
+    ws = w1 + w2 + w3
+    t_raw = _money_dec(float(pool) * (w1 / ws))
+    a_raw = _money_dec(float(pool) * (w2 / ws))
+    f_raw = pool - t_raw - a_raw
+
+    telefon = max(_money_dec(15), min(t_raw, _money_dec(120)))
+    auto_rate = max(_money_dec(100), min(a_raw, _money_dec(min(2500, float(pool)))))
+    fitness = max(_money_dec(25), min(f_raw, _money_dec(150)))
+
+    three = telefon + auto_rate + fitness
+    if three > pool and three > 0:
+        factor = float(pool / three) * 0.99
+        telefon = max(_money_dec(15), _money_dec(float(telefon) * factor))
+        auto_rate = max(_money_dec(100), _money_dec(float(auto_rate) * factor))
+        fitness = max(_money_dec(25), pool - telefon - auto_rate)
+        if fitness < _money_dec(25):
+            fitness = _money_dec(25)
+            auto_rate = max(_money_dec(100), pool - telefon - fitness)
+
+    return _PrivateMonthlyBudget(gehalt=Gd, miete=miete, telefon=telefon, auto_rate=auto_rate, fitness=fitness)
+
+
+def _iter_calendar_months(start: datetime, end: datetime) -> list[tuple[int, int]]:
+    """(year, month) for each calendar month overlapping [start, end]."""
+    months: list[tuple[int, int]] = []
+    y, m = start.year, start.month
+    while True:
+        first = datetime(y, m, 1)
+        if first > end:
+            break
+        if y > end.year or (y == end.year and m > end.month):
+            break
+        months.append((y, m))
+        if m == 12:
+            y += 1
+            m = 1
+        else:
+            m += 1
+    return months
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month == 12:
+        nxt = datetime(year + 1, 1, 1)
+    else:
+        nxt = datetime(year, month + 1, 1)
+    return (nxt - timedelta(days=1)).day
+
+
+def _month_datetime(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
+    dim = _days_in_month(year, month)
+    d = min(day, dim)
+    return datetime(year, month, d, hour, minute, random.randint(0, 59))
+
+
+def _sepa_transfer_in_profile() -> tuple[str, str, str]:
+    opts = [p for p in _COHERENT_INBOUND if p[0] == "transfer" and p[1] == "SEPA_CT"]
+    return random.choice(opts)
+
+
+def _sepa_transfer_out_profile() -> tuple[str, str, str]:
+    opts = [p for p in _COHERENT_OUTBOUND if p[0] == "transfer" and p[1] == "SEPA_CT"]
+    return random.choice(opts)
+
+
+def _build_private_recurring_txs(
+    account_id: str,
+    currency: str,
+    budget: _PrivateMonthlyBudget,
+    tx_counter_start: int,
+) -> tuple[list[_InternalTx], int]:
+    """One Gehalt in + Miete / Telefon / Auto / Fitness out per calendar month in history window."""
+    txs: list[_InternalTx] = []
+    n = tx_counter_start
+    for year, month in _iter_calendar_months(HISTORY_START, GENERATION_NOW):
+        month_de = GERMAN_MONTHS[month - 1]
+        # In before out same month: Gehalt on 25–28, outs on earlier month days would break;
+        # use Gehalt last, so day ordering: outs on 2–20, Gehalt on 25–28.
+        miete_dt = _month_datetime(year, month, random.randint(1, 3), 8, random.randint(0, 45))
+        telefon_dt = _month_datetime(year, month, random.randint(10, 15), 9, random.randint(0, 50))
+        fitness_dt = _month_datetime(year, month, random.randint(5, 9), 10, random.randint(0, 55))
+        auto_dt = _month_datetime(year, month, random.randint(4, 8), 11, random.randint(0, 40))
+        gehalt_dt = _month_datetime(year, month, random.randint(25, 28), 14, random.randint(0, 59))
+
+        def append_out(dt: datetime, amt: Decimal, ref: str) -> None:
+            nonlocal n
+            n += 1
+            tx = _InternalTx()
+            tx.account_id = account_id
+            tx.tx_id = f"TX-{account_id}-{n:04d}"
+            tx.dt = dt
+            tx.currency = currency
+            tx.is_trigger = False
+            _set_coherent_profile(tx, _sepa_transfer_out_profile())
+            tx.direction = "out"
+            tx.planned_amount = amt
+            tx.payment_reference_preset = ref
+            _fill_counterparty_non_cash(tx)
+            txs.append(tx)
+
+        append_out(
+            miete_dt,
+            budget.miete,
+            f"Miete {month_de} {year}",
+        )
+        append_out(
+            telefon_dt,
+            budget.telefon,
+            f"Telefonrechnung {month_de} {year}",
+        )
+        append_out(
+            fitness_dt,
+            budget.fitness,
+            f"Fitnessstudio-Mitgliedschaft {month_de}",
+        )
+        append_out(
+            auto_dt,
+            budget.auto_rate,
+            f"Fahrzeug-Leasing Rate {month_de} – {fake.numerify(text='####')}",
+        )
+
+        n += 1
+        tx_in = _InternalTx()
+        tx_in.account_id = account_id
+        tx_in.tx_id = f"TX-{account_id}-{n:04d}"
+        tx_in.dt = gehalt_dt
+        tx_in.currency = currency
+        tx_in.is_trigger = False
+        _set_coherent_profile(tx_in, _sepa_transfer_in_profile())
+        tx_in.direction = "in"
+        tx_in.planned_amount = budget.gehalt
+        tx_in.payment_reference_preset = f"Gehalt {month_de} {year}"
+        _fill_counterparty_non_cash(tx_in)
+        txs.append(tx_in)
+
+    return txs, n
+
+
 # ---------------------------------------------------------------------------
 # Transaction pool generation (12-month + trigger shaping)
 # ---------------------------------------------------------------------------
@@ -641,19 +1590,31 @@ def _generate_tx_pool(
     alert_type: str,
     num_trigger: int,
     num_background: int | None = None,
+    private_monthly_income: int | None = None,
 ) -> tuple[list[_InternalTx], float]:
     """Build the full 12-month transaction pool and return (pool, final_balance).
 
-    1. Generate background transactions (12 months).
-    2. Generate trigger transactions (within alert window).
-    3. Merge, sort chronologically, walk with running balance.
+    1. Optional private recurring (Gehalt + Miete + bills) for each calendar month.
+    2. Generate background transactions (12 months).
+    3. Generate trigger transactions (within alert window).
+    4. Merge, sort chronologically (inflows before outflows same timestamp), walk balance.
     """
+
+    pool: list[_InternalTx] = []
+    tx_counter = 0
+    recurring: list[_InternalTx] = []
+    if private_monthly_income is not None:
+        budget = _private_recurring_amounts(private_monthly_income)
+        recurring, tx_counter = _build_private_recurring_txs(
+            account_id, currency, budget, tx_counter,
+        )
 
     # -- Background transactions (spread over 12 months) --------------------
     if num_background is None:
         num_background = random.randint(40, 80)
-    pool: list[_InternalTx] = []
-    tx_counter = 0
+    if recurring:
+        num_background = max(15, num_background - len(recurring))
+    pool.extend(recurring)
 
     for _ in range(num_background):
         tx_counter += 1
@@ -736,12 +1697,27 @@ def _generate_tx_pool(
 
     pool.extend(trigger_txs)
 
-    # -- Sort chronologically and assign amounts via running balance ---------
-    pool.sort(key=lambda t: t.dt)
+    # -- Sort chronologically; inbound before outbound when timestamps tie --------
+    pool.sort(key=lambda t: (t.dt, 0 if t.direction == "in" else 1))
 
     balance = _money_dec(opening_balance)
     for tx in pool:
         amt: Decimal
+        if tx.planned_amount is not None:
+            if tx.direction == "in":
+                amt = tx.planned_amount
+                balance = balance + amt
+            else:
+                max_out = balance
+                if max_out <= 0:
+                    amt = _money_dec(0)
+                else:
+                    amt = min(tx.planned_amount, max_out)
+                balance = balance - amt
+            tx.amount = _money_float(amt)
+            tx.balance_after = _money_float(balance)
+            continue
+
         if tx.direction == "out":
             max_out = balance
             if max_out <= 0:
@@ -791,9 +1767,12 @@ def _generate_tx_pool(
 
     # -- Assign payment references (after balance walk, direction is final) --
     for tx in pool:
-        tx.payment_reference = _generate_payment_reference(
-            tx.tx_type, tx.direction, tx.dt, tx.cp_name, tx.amount,
-        )
+        if tx.payment_reference_preset:
+            tx.payment_reference = tx.payment_reference_preset
+        else:
+            tx.payment_reference = _generate_payment_reference(
+                tx.tx_type, tx.direction, tx.dt, tx.cp_name, tx.amount,
+            )
 
     return pool, _money_float(balance)
 
@@ -957,7 +1936,7 @@ def _to_history(tx: _InternalTx) -> HistoryTransaction:
 # Main alert generator
 # ---------------------------------------------------------------------------
 
-def generate_alert(alert_index: int) -> Alert:
+def generate_alert(alert_index: int, *, use_public_figure: bool = False) -> Alert:
     """Generate one full alert conforming to the 132-field schema."""
     alert_id = f"ALT-{alert_index:05d}"
     customer_id = f"CUST-{alert_index:05d}-{random.randint(100000, 999999)}"
@@ -968,7 +1947,12 @@ def generate_alert(alert_index: int) -> Alert:
     created_at_dt = _random_dt_between(ALERT_WINDOW_START, ALERT_WINDOW_END)
     created_at = created_at_dt.isoformat()
     # Customer
-    profile = generate_customer_profile(customer_id)
+    if use_public_figure:
+        n_pf = len(VERIFIED_PUBLIC_FIGURES)
+        pf = VERIFIED_PUBLIC_FIGURES[(alert_index * 7919 + n_pf) % n_pf]
+        profile = generate_customer_profile(customer_id, verified_figure_row=pf)
+    else:
+        profile = generate_customer_profile(customer_id)
 
     # Rules
     rules = generate_rules_triggered(alert_type)
@@ -978,13 +1962,25 @@ def generate_alert(alert_index: int) -> Alert:
     # Number of trigger transactions
     num_trigger = 1 if alert_type == "large_single_transaction" else random.randint(2, 5)
 
-    # Opening balance
-    opening_balance = _money_float(
-        _truncated_gauss(5000.0, 150000.0, mu=77500.0, sigma=(150000.0 - 5000.0) / 6.0),
+    # Opening balance (from employment, risk, industry)
+    opening_balance = _opening_balance_for_profile(
+        profile.employment_status,
+        profile.customer_risk_rating,
+        profile.industry,
+        secondary=False,
     )
 
-    # Build 12-month pool with running balance
-    pool, final_balance = _generate_tx_pool(account_id, currency, opening_balance, alert_type, num_trigger)
+    private_income = (
+        profile.expected_monthly_income if profile.customer_type == "private" else None
+    )
+    pool, final_balance = _generate_tx_pool(
+        account_id,
+        currency,
+        opening_balance,
+        alert_type,
+        num_trigger,
+        private_monthly_income=private_income,
+    )
 
     # Account summary (balance = final running balance)
     primary_account = generate_account_summary(account_id, currency, final_balance)
@@ -994,8 +1990,11 @@ def generate_alert(alert_index: int) -> Alert:
     secondary_pool: list[_InternalTx] = []
     if random.random() < 0.3:
         extra_id = f"ACC-{alert_index:05d}-{random.randint(2000000, 2999999)}"
-        extra_opening = _money_float(
-            _truncated_gauss(1000.0, 50000.0, mu=25500.0, sigma=(50000.0 - 1000.0) / 6.0),
+        extra_opening = _opening_balance_for_profile(
+            profile.employment_status,
+            profile.customer_risk_rating,
+            profile.industry,
+            secondary=True,
         )
         secondary_pool, extra_final = _generate_tx_pool(
             extra_id, currency, extra_opening, alert_type,
